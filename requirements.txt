@@ -1,0 +1,4 @@
+eth-abi>=5
+eth-hash[pycryptodome]
+requests
+python-dotenv
