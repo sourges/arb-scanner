@@ -32,6 +32,17 @@ class RouteResult:
     cex_fee_usd: float
     gas_usd: float
     rebalance_usd: float
+    base_amount: float = 0.0   # ETH/BTC bought on the buy leg and sold on the sell leg
+
+    @property
+    def buy_px(self):
+        """Effective price paid per ETH/BTC on the buy leg (fees and slippage included)."""
+        return self.size_usd / self.base_amount if self.base_amount else None
+
+    @property
+    def sell_px(self):
+        """Effective price received per ETH/BTC on the sell leg (before CEX fee and gas)."""
+        return self.usd_back / self.base_amount if self.base_amount else None
 
     @property
     def gross_usd(self) -> float:
@@ -88,7 +99,7 @@ def dex_dex_route(pair: str, size: float, quotes):
             if usd is None:
                 continue
             r = RouteResult("dex>dex", pair, a.label, b.label, size, usd, 0.0,
-                            a.buy_gas_usd + b.sell_gas_usd, 0.0)
+                            a.buy_gas_usd + b.sell_gas_usd, 0.0, a.buy_base_out)
             if best is None or r.net_usd > best.net_usd:
                 best = r
     return best
@@ -107,7 +118,7 @@ def cex_buy_dex_sell(pair, size, quotes, book, schedule, fees, side, rebalance):
     if q is None:
         return None
     return RouteResult(f"{schedule}_{side}>dex", pair, f"{schedule}_{side}", q.label,
-                       size, usd, size * rate, q.sell_gas_usd, rebalance)
+                       size, usd, size * rate, q.sell_gas_usd, rebalance, base)
 
 
 def dex_buy_cex_sell(pair, size, quotes, book, schedule, fees, side, rebalance):
@@ -124,7 +135,7 @@ def dex_buy_cex_sell(pair, size, quotes, book, schedule, fees, side, rebalance):
     if usd is None:
         return None
     return RouteResult(f"dex>{schedule}_{side}", pair, q.label, f"{schedule}_{side}",
-                       size, usd, usd * rate, q.buy_gas_usd, rebalance)
+                       size, usd, usd * rate, q.buy_gas_usd, rebalance, base)
 
 
 def compute_routes(pair: str, size: float, quotes, books: dict, cex_fees: dict, rebalance: float):

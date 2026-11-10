@@ -1,8 +1,10 @@
 """End-to-end: startup + step against the fake chain and fake CEX books."""
+import io
 import unittest
+from contextlib import redirect_stdout
 
 import db
-from scanner import Scanner, status_line
+from scanner import Scanner, episode_line, print_table, status_line
 from tests.fakes import WETH, FakeChain, FakeFetchers, make_config
 
 AERO_QUOTER = "0x" + "b2" * 20
@@ -78,8 +80,14 @@ class TestScanner(unittest.TestCase):
         chain.block, clock.t = 103, clock.t + 2
         s.step()
         rows = s.conn.execute(
-            "SELECT pair, route, blocks, best_sell FROM episodes WHERE route='dex>dex'").fetchall()
+            "SELECT pair, route, samples, best_sell FROM episodes WHERE route='dex>dex'").fetchall()
         self.assertEqual(rows, [("ETH", "dex>dex", 2, "aero-ts100")])
+        # prices at the best moment: bought on uni at 2000/0.9995, sold on aero at 2020*0.9995
+        mid, buy_px, sell_px = s.conn.execute(
+            "SELECT best_mid, best_buy_px, best_sell_px FROM episodes WHERE route='dex>dex'").fetchone()
+        self.assertAlmostEqual(mid, 2000.0)
+        self.assertAlmostEqual(buy_px, 2000 / 0.9995, delta=0.01)
+        self.assertAlmostEqual(sell_px, 2020 * 0.9995, delta=0.01)
         s.shutdown()
 
     def test_kraken_outage_falls_back_to_coinbase_after_cache_expires(self):
@@ -102,6 +110,32 @@ class TestScanner(unittest.TestCase):
         self.assertEqual(
             s.conn.execute("SELECT COUNT(*) FROM episodes WHERE route='dex>dex'").fetchone(), (1,))
 
+
+class TestOutput(unittest.TestCase):
+    def test_episode_line_shows_prices_and_samples(self):
+        from tracker import Episode
+        e = Episode("dex>dex", "ETH", 1, 0.0, 9, 18.0, 10, 0.668, 0.668, "aero3-ts1", "pcsv3-500",
+                    best_mid=3000.0, best_buy_px=2990.5, best_sell_px=3010.25)
+        line = episode_line(e)
+        self.assertIn("10 samples / 18s", line)
+        self.assertIn("aero3-ts1 @2,990.50", line)
+        self.assertIn("pcsv3-500 @3,010.25", line)
+        self.assertIn("cex mid 3,000.00", line)
+
+    def test_episode_line_without_prices(self):
+        from tracker import Episode
+        e = Episode("k", "BTC", 1, 0.0, 1, 0.0, 1, 0.1, 0.1, "A", "B")
+        self.assertIn("@?", episode_line(e))
+
+    def test_long_route_names_stay_in_their_column(self):
+        s, *_ = make_scanner()
+        _, results = s.step()
+        s.shutdown()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_table(results)
+        for line in buf.getvalue().splitlines()[1:]:
+            self.assertEqual(line[33], " ", line)    # the 34-wide route column always ends in a space
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,9 +49,11 @@ Startup checks the token addresses (symbol + decimals) on-chain and lists the po
 ```
 python report.py              all history
 python report.py --hours 24   last day
+python report.py --min-usd 0.10 --top 30
 ```
 
-- **episodes** table: each run of consecutive profitable blocks for a route: length in blocks/seconds and best net. Lasting episodes are what a slower bot could catch.
+- **episodes** table: each run of consecutive profitable scans for a route: samples, seconds, best net, and the prices at the best moment (buy price, sell price, CEX mid) so you can see which side moved. Lasting episodes are what a slower bot could catch. Base makes a block about every 0.2s and the scanner samples about every 2s, so read `samples`/`seconds`, not the block columns.
+- `report.py` skips episodes under `--min-usd` (default $0.05) as dust and lists the top episodes with their prices.
 - **minute_stats** table: per route per minute: samples, how many were > 0, best and average net %.
 
 ## Settings

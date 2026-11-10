@@ -1,12 +1,16 @@
-"""Turns per-block route results into two things worth storing:
+"""Turns per-scan route results into two things worth storing:
 
-Episodes: a run of consecutive scanned blocks where a route's net was > 0.
-    One row per episode: how long it lasted and how good it got. This is
-    the "is anything left for a slow bot?" measurement.
+Episodes: a run of consecutive scans where a route's net was > 0.
+    One row per episode: how many scans it lasted, how many seconds, how good it
+    got, and the prices at its start and at its best moment. The prices show
+    which side moved (e.g. Kraken dropped and the DEX pool lagged).
 
 Minute stats: per route per minute, best/average net % and how many samples
     were positive. This shows the near-misses and how far below break-even
     routes usually sit.
+
+Note: Base makes a block about every 0.2s and the scanner samples about every
+2s, so "samples" and "seconds" are the meaningful durations, not block counts.
 """
 from __future__ import annotations
 
@@ -26,6 +30,10 @@ class Episode:
     max_net_pct: float
     best_buy: str
     best_sell: str
+    start_mid: float | None = None     # CEX reference price when the episode opened
+    best_mid: float | None = None      # CEX reference price at the best moment
+    best_buy_px: float | None = None   # effective buy price at the best moment
+    best_sell_px: float | None = None  # effective sell price at the best moment
 
     @property
     def blocks(self) -> int:
@@ -40,9 +48,12 @@ class EpisodeTracker:
     def __init__(self):
         self.open = {}   # (pair, key) -> Episode
 
-    def update(self, block: int, ts: float, results: dict):
-        """results: {(pair, key): RouteResult} for this round. Returns closed episodes.
-        A route that is missing this round (venue down, quote failed) closes its episode."""
+    def update(self, block: int, ts: float, results: dict, mids: dict | None = None):
+        """results: {(pair, key): RouteResult} for this round.
+        mids: {pair: CEX reference price} for this round (optional).
+        Returns closed episodes. A route that is missing this round (venue down,
+        quote failed) closes its episode."""
+        mids = mids or {}
         closed = []
         for k, ep in list(self.open.items()):
             r = results.get(k)
@@ -51,15 +62,19 @@ class EpisodeTracker:
         for k, r in results.items():
             if r.net_usd <= 0:
                 continue
+            mid = mids.get(r.pair)
             ep = self.open.get(k)
             if ep is None:
                 self.open[k] = Episode(r.key, r.pair, block, ts, block, ts, 1,
-                                       r.net_usd, r.net_pct, r.buy_venue, r.sell_venue)
+                                       r.net_usd, r.net_pct, r.buy_venue, r.sell_venue,
+                                       start_mid=mid, best_mid=mid,
+                                       best_buy_px=r.buy_px, best_sell_px=r.sell_px)
             else:
                 ep.end_block, ep.end_ts, ep.samples = block, ts, ep.samples + 1
                 if r.net_usd > ep.max_net_usd:
                     ep.max_net_usd, ep.max_net_pct = r.net_usd, r.net_pct
                     ep.best_buy, ep.best_sell = r.buy_venue, r.sell_venue
+                    ep.best_mid, ep.best_buy_px, ep.best_sell_px = mid, r.buy_px, r.sell_px
         return closed
 
     def flush(self):

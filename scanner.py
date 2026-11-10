@@ -116,12 +116,11 @@ class Scanner:
                                          cfg.CEX_FEES, cfg.REBALANCE_COST_USD).items():
                 results[(name, key)] = r
 
-        closed = self.tracker.update(rd.block, now, results)
+        closed = self.tracker.update(rd.block, now, results, dict(self.ref_prices))
         if closed:
             db.insert_episodes(self.conn, closed)
             for e in closed:
-                log(f"EPISODE {e.pair} {e.key}: {e.blocks} blocks / {e.seconds:.0f}s, "
-                    f"best ${e.max_net_usd:+.3f} ({e.max_net_pct:+.3f}%) {e.best_buy} -> {e.best_sell}")
+                log(episode_line(e))
         rows = self.minutes.add(now, results)
         if rows:
             db.insert_minutes(self.conn, rows)
@@ -131,6 +130,18 @@ class Scanner:
         db.insert_episodes(self.conn, self.tracker.flush())
         db.insert_minutes(self.conn, self.minutes.flush())
         self.pool.shutdown(wait=False)
+
+
+def fmt_px(px):
+    return f"{px:,.2f}" if px else "?"
+
+
+def episode_line(e):
+    """One log line per closed episode: duration, best profit, and the prices behind it."""
+    return (f"EPISODE {e.pair} {e.key}: {e.samples} samples / {e.seconds:.0f}s, "
+            f"best ${e.max_net_usd:+.3f} ({e.max_net_pct:+.3f}%) "
+            f"buy {e.best_buy} @{fmt_px(e.best_buy_px)} -> sell {e.best_sell} @{fmt_px(e.best_sell_px)}, "
+            f"cex mid {fmt_px(e.best_mid)}")
 
 
 def status_line(block, results):
@@ -145,10 +156,10 @@ def status_line(block, results):
 
 
 def print_table(results):
-    print(f"{'route':<26}{'buy':<22}{'sell':<22}{'back $':>10}{'cex fee':>9}{'gas':>8}{'net $':>9}{'net %':>9}")
+    print(f"{'route':<34}{'buy':<24}{'sell':<24}{'back $':>10}{'cex fee':>9}{'gas':>8}{'net $':>9}{'net %':>10}")
     for (_pair, _key), r in sorted(results.items(), key=lambda kv: -kv[1].net_pct):
-        print(f"{r.pair + ' ' + r.key:<26}{r.buy_venue:<22}{r.sell_venue:<22}{r.usd_back:>10.3f}"
-              f"{r.cex_fee_usd:>9.3f}{r.gas_usd:>8.4f}{r.net_usd:>9.3f}{r.net_pct:>8.3f}%")
+        print(f"{r.pair + ' ' + r.key:<34}{r.buy_venue:<24}{r.sell_venue:<24}{r.usd_back:>10.3f}"
+              f"{r.cex_fee_usd:>9.3f}{r.gas_usd:>8.4f}{r.net_usd:>9.3f}{r.net_pct:>9.3f}%")
 
 
 def main(argv=None):

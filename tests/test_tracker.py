@@ -6,9 +6,9 @@ from tracker import EpisodeTracker, MinuteStats
 K = ("ETH", "dex>dex")
 
 
-def rr(net_usd, key="dex>dex", buy="A", sell="B"):
-    # usd_back chosen so net_usd comes out exactly (no fees/gas)
-    return RouteResult(key, "ETH", buy, sell, 100.0, 100.0 + net_usd, 0.0, 0.0, 0.0)
+def rr(net_usd, key="dex>dex", buy="A", sell="B", base=0.05):
+    # usd_back chosen so net_usd comes out exactly (no fees/gas); 0.05 base -> buy_px 2000
+    return RouteResult(key, "ETH", buy, sell, 100.0, 100.0 + net_usd, 0.0, 0.0, 0.0, base)
 
 
 class TestEpisodeTracker(unittest.TestCase):
@@ -41,6 +41,23 @@ class TestEpisodeTracker(unittest.TestCase):
         t.update(1, 0.0, {K: rr(0.2)})
         self.assertEqual(len(t.flush()), 1)
         self.assertEqual(t.open, {})
+
+    def test_prices_recorded_at_start_and_best_moment(self):
+        t = EpisodeTracker()
+        t.update(1, 0.0, {K: rr(0.2)}, {"ETH": 2000.0})
+        t.update(2, 2.0, {K: rr(0.5)}, {"ETH": 1990.0})     # best moment
+        t.update(3, 4.0, {K: rr(0.1)}, {"ETH": 1985.0})     # positive but not best
+        (ep,) = t.update(4, 6.0, {K: rr(-0.1)}, {"ETH": 1984.0})
+        self.assertEqual((ep.start_mid, ep.best_mid), (2000.0, 1990.0))
+        self.assertAlmostEqual(ep.best_buy_px, 2000.0)           # 100 / 0.05
+        self.assertAlmostEqual(ep.best_sell_px, 100.5 / 0.05)    # 2010.0 at the best moment
+
+    def test_missing_mids_leave_none(self):
+        t = EpisodeTracker()
+        t.update(1, 0.0, {K: rr(0.2)})
+        (ep,) = t.flush()
+        self.assertIsNone(ep.start_mid)
+        self.assertIsNone(ep.best_mid)
 
 
 class TestMinuteStats(unittest.TestCase):

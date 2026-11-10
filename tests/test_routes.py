@@ -101,5 +101,36 @@ class TestRoutes(unittest.TestCase):
         self.assertIn("kraken_reduced_maker>dex", rs)
 
 
+class TestEffectivePrices(unittest.TestCase):
+    """buy_px = $100 / base bought; sell_px = USD back / base sold."""
+
+    def test_dex_dex_prices(self):
+        # buys 0.0505 on A -> 100/0.0505 = 1980.198; sells for 101.505 -> 101.505/0.0505 = 2010.0
+        r = dex_dex_route("ETH", 100.0, quotes())
+        self.assertAlmostEqual(r.base_amount, 0.0505)
+        self.assertAlmostEqual(r.buy_px, 1980.19802, places=4)
+        self.assertAlmostEqual(r.sell_px, 2010.0)
+
+    def test_cex_taker_buy_prices(self):
+        # lifts the 2000 ask: 0.05 base; sells on B for 100.50 -> 2010.0
+        r = routes()["kraken_reduced_taker>dex"]
+        self.assertAlmostEqual(r.buy_px, 2000.0)
+        self.assertAlmostEqual(r.sell_px, 2010.0)
+
+    def test_dex_buy_cex_taker_sell_prices(self):
+        # buys 0.0505 on A (1980.198), hits the 1990 bid
+        r = routes()["dex>kraken_reduced_taker"]
+        self.assertAlmostEqual(r.buy_px, 1980.19802, places=4)
+        self.assertAlmostEqual(r.sell_px, 1990.0)
+
+    def test_maker_buy_fills_at_best_bid(self):
+        self.assertAlmostEqual(routes()["kraken_reduced_maker>dex"].buy_px, 1990.0)
+
+    def test_no_amount_gives_none(self):
+        from routes import RouteResult
+        r = RouteResult("k", "ETH", "a", "b", 100.0, 100.0, 0.0, 0.0, 0.0)
+        self.assertIsNone(r.buy_px)
+        self.assertIsNone(r.sell_px)
+
 if __name__ == "__main__":
     unittest.main()
