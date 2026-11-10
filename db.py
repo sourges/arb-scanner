@@ -1,8 +1,8 @@
-"""SQLite storage. One file (arb_scanner.sqlite), two tables. Open it with
+"""SQLite storage. One file (arb_scanner.sqlite), three tables. Open it with
 report.py, DB Browser for SQLite, or pandas.read_sql.
 
-connect() also upgrades an older database in place: any episode columns added
-since it was created are added, so existing data is kept.
+connect() also upgrades an older database in place: missing tables and any
+episode columns added since it was created are added, so existing data is kept.
 """
 import sqlite3
 
@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS minute_stats (
     avg_net_pct   REAL,
     PRIMARY KEY (minute, pair, route)
 );
+CREATE TABLE IF NOT EXISTS pegged_quotes (
+    ts            REAL,
+    block         INTEGER,
+    pair          TEXT,
+    pool          TEXT,
+    bid           REAL,
+    ask           REAL
+);
+CREATE INDEX IF NOT EXISTS idx_pegged_pair_ts ON pegged_quotes (pair, ts);
 """
 
 # Columns added after v1. Older databases get them via ALTER TABLE (old rows read NULL).
@@ -66,5 +75,14 @@ def insert_minutes(conn, rows):
     conn.executemany(
         "INSERT OR REPLACE INTO minute_stats VALUES (?,?,?,?,?,?,?)",
         [(r.minute, r.pair, r.key, r.samples, r.positives, r.best_net_pct, r.avg_net_pct) for r in rows],
+    )
+    conn.commit()
+
+
+def insert_pegged(conn, ts, block, quotes):
+    """Recorder rows: one per pool per minute (price = B per 1 A, see recorder.py)."""
+    conn.executemany(
+        "INSERT INTO pegged_quotes (ts, block, pair, pool, bid, ask) VALUES (?,?,?,?,?,?)",
+        [(ts, block, q.pair, q.pool, q.bid, q.ask) for q in quotes],
     )
     conn.commit()

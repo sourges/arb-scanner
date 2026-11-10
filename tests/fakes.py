@@ -17,6 +17,8 @@ ORACLE = config.GAS_PRICE_ORACLE.lower()
 USDC = config.USDC["address"].lower()
 WETH = config.PAIRS[0]["base"]["address"].lower()
 CBBTC = config.PAIRS[1]["base"]["address"].lower()
+WBTC = config.WBTC["address"].lower()
+USDT = config.USDT["address"].lower()
 
 UNI_FACTORY = "0x" + "a1" * 20
 UNI_QUOTER = "0x" + "a2" * 20
@@ -29,7 +31,7 @@ SEL = {name: abi.selector(sig) for name, sig in {
     "decimals": abi.SIG_DECIMALS, "block": abi.SIG_BLOCK_NUMBER, "basefee": abi.SIG_BASEFEE,
     "l1": abi.SIG_L1_FEE_UPPER}.items()}
 
-DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8}
+DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8, WBTC: 8, USDT: 6}
 
 
 class Revert(Exception):
@@ -42,7 +44,9 @@ class FakeChain:
         self.basefee = 10_000_000          # 0.01 gwei
         self.l1_fee = 1_000_000_000_000    # 1e12 wei
         self.l1_fails = False
-        self.tokens = {USDC: ("USDC", 6), WETH: ("WETH", 18), CBBTC: ("cbBTC", 8)}
+        # USDbC and DAI are deliberately unknown here: the recorder must skip those pairs.
+        self.tokens = {USDC: ("USDC", 6), WETH: ("WETH", 18), CBBTC: ("cbBTC", 8),
+                       WBTC: ("WBTC", 8), USDT: ("USDT", 6)}
         # (factory, tier) -> pool address
         self.pools = {
             (UNI_FACTORY, 500): "0x" + "c1" * 20,
@@ -54,6 +58,12 @@ class FakeChain:
             (SLIP_QUOTER, 100, WETH): (2000.0, 0.0005),
             (UNI_QUOTER, 500, CBBTC): (60000.0, 0.0005),
             (SLIP_QUOTER, 100, CBBTC): (60000.0, 0.0005),
+        }
+        # pegged pools: (quoter, tier, token A, token B) -> (price of A in B, fee fraction)
+        self.pegged = {
+            (UNI_QUOTER, 500, CBBTC, WBTC): (0.9998, 0.0001),
+            (SLIP_QUOTER, 100, CBBTC, WBTC): (1.0003, 0.0001),
+            (UNI_QUOTER, 500, USDT, USDC): (1.0, 0.0001),      # no USDT pool on aero: reverts
         }
         self.quote_gas = 100_000
         self.calls = 0
@@ -97,6 +107,16 @@ class FakeChain:
             t = "uint24" if sel == SEL["q_uni"] else "int24"
             ((tin, tout, amount, tier, _limit),) = decode([f"(address,address,uint256,{t},uint160)"], args)
             tin, tout = tin.lower(), tout.lower()
+            if (target, tier, tin, tout) in self.pegged:      # selling A for B
+                price, fee = self.pegged[(target, tier, tin, tout)]
+                out = amount / 10 ** DECIMALS[tin] * price * (1 - fee) * 10 ** DECIMALS[tout]
+                return encode(["uint256", "uint160", "uint32", "uint256"], [int(out), 0, 0, self.quote_gas])
+            if (target, tier, tout, tin) in self.pegged:      # buying A with B
+                price, fee = self.pegged[(target, tier, tout, tin)]
+                out = amount / 10 ** DECIMALS[tin] / price * (1 - fee) * 10 ** DECIMALS[tout]
+                return encode(["uint256", "uint160", "uint32", "uint256"], [int(out), 0, 0, self.quote_gas])
+            if USDC not in (tin, tout):
+                raise Revert()
             base = tout if tin == USDC else tin
             key = (target, tier, base)
             if key not in self.prices:

@@ -5,6 +5,10 @@ Run:  python report.py                      whole history
       python report.py --min-usd 0.10       count only episodes that reached $0.10
       python report.py --top 30             list the 30 best episodes (default 15)
 
+The last section summarizes the pegged-pair recorder (one quote per minute per
+pool): where each pair's mid sits versus 1.0, how much it wanders, and how often
+the best bid on one pool beat the best ask on another (a gross gap, before gas).
+
 Episodes below --min-usd (default $0.05) are counted as dust and left out of
 the episode tables, so the few real opportunities aren't buried.
 """
@@ -58,6 +62,34 @@ def top_episodes(conn, since_ts, min_usd, limit):
         " ORDER BY max_net_usd DESC LIMIT ?", (since_ts, min_usd, limit)).fetchall()
 
 
+def pegged_summary(conn, since_ts):
+    """Per pair from the recorder: minutes, mid vs 1.0 (avg/min/max/std in bp),
+    minutes where gap > 0, and the best gap in bp. Best bid/ask are taken across
+    pools within each minute, as in recorder.summarize."""
+    minutes = {}
+    for pair, ts, bid, ask in conn.execute(
+            "SELECT pair, ts, bid, ask FROM pegged_quotes WHERE ts >= ?", (since_ts,)):
+        best = minutes.setdefault((pair, ts), [None, None])
+        if bid is not None and (best[0] is None or bid > best[0]):
+            best[0] = bid
+        if ask is not None and (best[1] is None or ask < best[1]):
+            best[1] = ask
+    per_pair = {}
+    for (pair, _ts), (bid, ask) in minutes.items():
+        if bid is None or ask is None:
+            continue
+        mid_bp = ((bid + ask) / 2 - 1.0) * 1e4
+        gap_bp = (bid / ask - 1.0) * 1e4
+        per_pair.setdefault(pair, []).append((mid_bp, gap_bp))
+    out = []
+    for pair, vals in per_pair.items():
+        mids = [v[0] for v in vals]
+        gaps = [v[1] for v in vals]
+        out.append((pair, len(vals), statistics.fmean(mids), min(mids), max(mids),
+                    statistics.pstdev(mids), sum(1 for g in gaps if g > 0), max(gaps)))
+    return sorted(out)
+
+
 def fmt_px(px):
     return f"{px:,.2f}" if px else "?"
 
@@ -102,6 +134,14 @@ def print_report(conn, since, min_usd, top):
 
     print("\n'sum best $' adds each episode's best moment once: an upper bound, not a P&L.")
     print("Prices show '?' for episodes logged before price tracking was added.")
+
+    print("\nPEGGED PAIRS (recorder, once a minute; mid in bp away from 1.0, gap before gas)")
+    print(f"{'pair':<14}{'minutes':>9}{'avg mid':>9}{'min':>8}{'max':>8}{'std':>7}{'gap>0':>8}{'best gap':>10}")
+    pegs = pegged_summary(conn, since)
+    if not pegs:
+        print("  none yet")
+    for pair, n, avg, lo, hi, std, pos, best in pegs:
+        print(f"{pair:<14}{n:>9}{avg:>+9.1f}{lo:>+8.1f}{hi:>+8.1f}{std:>7.1f}{pos:>8}{best:>+10.1f}")
 
 
 if __name__ == "__main__":

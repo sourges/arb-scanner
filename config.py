@@ -44,6 +44,7 @@ MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
 GAS_PRICE_ORACLE = "0x420000000000000000000000000000000000000F"
 
 USDC = {"address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "symbol": "USDC", "decimals": 6}
+CBBTC = {"address": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", "symbol": "cbBTC", "decimals": 8}
 
 PAIRS = [
     {
@@ -54,10 +55,31 @@ PAIRS = [
     },
     {
         "name": "BTC",
-        "base": {"address": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", "symbol": "cbBTC", "decimals": 8},
+        "base": CBBTC,
         "kraken": "XBTUSD",
         "coinbase": "BTC-USD",
     },
+]
+
+# ---- pegged-pair recorder (data for the stat-arb project) -----------------------
+# Once a minute, each pair below is quoted both ways on every pool and one row per
+# pool goes in the pegged_quotes table. Price is "B per 1 A", so it sits near 1.0.
+# usd_ref: which PAIRS price gives the USD value of one token (None = $1, a stablecoin).
+# A token whose on-chain symbol/decimals don't match is skipped with a log line;
+# it does not stop the scanner.
+RECORD_SECONDS = 60
+RECORD_SIZE_USD = 100.0
+
+WBTC = {"address": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c", "symbol": "WBTC", "decimals": 8}
+USDT = {"address": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", "symbol": "USDT", "decimals": 6}
+USDBC = {"address": "0xd9aAEc86B65D86f6a7B5B1b0c42FFA531710b6CA", "symbol": "USDbC", "decimals": 6}
+DAI = {"address": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", "symbol": "DAI", "decimals": 18}
+
+RECORD_PAIRS = [
+    {"name": "cbBTC/WBTC", "a": CBBTC, "b": WBTC, "usd_ref": "BTC"},
+    {"name": "USDT/USDC",  "a": USDT,  "b": USDC, "usd_ref": None},
+    {"name": "USDbC/USDC", "a": USDBC, "b": USDC, "usd_ref": None},
+    {"name": "DAI/USDC",   "a": DAI,   "b": USDC, "usd_ref": None},
 ]
 
 # kind "uni"  = Uniswap-v3-style pools keyed by fee tier (in hundredths of a bip: 500 = 0.05%)

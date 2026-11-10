@@ -15,6 +15,7 @@ import cex
 import config
 import db
 import dex
+import recorder
 from routes import compute_routes
 from rpc import RpcClient, RpcError
 from tracker import EpisodeTracker, MinuteStats
@@ -39,6 +40,7 @@ class Scanner:
         self.last_block = None
         self.book_failures = 0
         self.pool = ThreadPoolExecutor(max_workers=8)
+        self.recorder = recorder.Recorder(cfg, rpc, conn, log)
 
     # ---- startup ------------------------------------------------------------------
 
@@ -69,6 +71,7 @@ class Scanner:
         if missing:
             raise SystemExit(f"No CEX price for {missing}: Kraken and Coinbase both unreachable?")
         log("reference prices: " + ", ".join(f"{k} ${v:,.2f}" for k, v in self.ref_prices.items()))
+        self.recorder.startup()
 
     # ---- per round -----------------------------------------------------------------
 
@@ -124,6 +127,10 @@ class Scanner:
         rows = self.minutes.add(now, results)
         if rows:
             db.insert_minutes(self.conn, rows)
+        if self.recorder.due(now):
+            quotes = self.recorder.record(now, dict(self.ref_prices))
+            if quotes:
+                log(recorder.summary_line(quotes))
         return rd.block, results
 
     def shutdown(self):
@@ -175,6 +182,8 @@ def main(argv=None):
         out = scanner.step()
         if out:
             print_table(out[1])
+            print()
+            recorder.print_table(scanner.recorder.last_quotes)
         scanner.shutdown()
         return
 

@@ -90,6 +90,22 @@ class TestScanner(unittest.TestCase):
         self.assertAlmostEqual(sell_px, 2020 * 0.9995, delta=0.01)
         s.shutdown()
 
+    def test_recorder_runs_once_per_minute_inside_step(self):
+        s, chain, clock, _ = make_scanner()
+        self.assertEqual([p["name"] for p, _ in s.recorder.pairs], ["cbBTC/WBTC", "USDT/USDC"])
+        clock.t = 1_000_020.0
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            s.step()                                             # first step records
+            chain.block, clock.t = 101, clock.t + 2
+            s.step()                                             # same minute: no record
+            chain.block, clock.t = 102, clock.t + 60
+            s.step()                                             # next minute records again
+        n = s.conn.execute("SELECT COUNT(DISTINCT ts) FROM pegged_quotes").fetchone()[0]
+        self.assertEqual(n, 2)
+        self.assertEqual(buf.getvalue().count("PEG cbBTC/WBTC"), 2)
+        s.shutdown()
+
     def test_kraken_outage_falls_back_to_coinbase_after_cache_expires(self):
         s, chain, clock, fetchers = make_scanner()
         fetchers.fail.add("kraken")
