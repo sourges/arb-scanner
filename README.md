@@ -70,6 +70,25 @@ python report.py --min-usd 0.10 --top 30
 - **minute_stats** table: per route per minute: samples, how many were > 0, best and average net %.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
 
+## Sharing the data (stat-arb and other projects)
+
+The live database (`arb_scanner.sqlite`) belongs to the scanner. It runs in SQLite's
+WAL mode, so readers never block the scanner's writes, and it keeps two side files
+next to it: `arb_scanner.sqlite-wal` and `arb_scanner.sqlite-shm`. **Never delete
+them while the scanner runs, and never copy the .sqlite file by itself.**
+
+Other projects read a snapshot instead:
+
+```
+python export_db.py                        (writes arb_scanner_snapshot.sqlite)
+python export_db.py --out D:\data\snap.sqlite
+```
+
+The snapshot is one consistent moment of the database, including recent writes still
+in the WAL file. It's safe to run while the scanner runs, and it's a plain single file
+you can copy to another PC. A busy or locked database never stops the scanner: that
+round is skipped and retried like an RPC error.
+
 ## Settings
 
 All in `config.py` (trade size, fee tiers, rebalance cost, pairs, DEXs, gas model). Edit on the main PC, push, pull on the 24/7 PC.

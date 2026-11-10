@@ -1,9 +1,12 @@
 """End-to-end: startup + step against the fake chain and fake CEX books."""
 import io
+import sqlite3
 import unittest
 from contextlib import redirect_stdout
 
 import db
+import scanner as scanner_mod
+from rpc import RpcError
 from scanner import Scanner, episode_line, print_table, status_line
 from tests.fakes import WETH, FakeChain, FakeFetchers, make_config
 
@@ -152,6 +155,46 @@ class TestOutput(unittest.TestCase):
             print_table(results)
         for line in buf.getvalue().splitlines()[1:]:
             self.assertEqual(line[33], " ", line)    # the 34-wide route column always ends in a space
+
+class StubScanner:
+    """step() raises the queued errors first, then returns a quiet round."""
+
+    def __init__(self, errors):
+        self.errors = list(errors)
+        self.calls = 0
+
+    def step(self):
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return 100 + self.calls, {}
+
+
+class TestRunForever(unittest.TestCase):
+    def run_loop(self, stub, rounds):
+        sleeps = []
+        with redirect_stdout(io.StringIO()) as out:
+            fails = scanner_mod.run_forever(stub, 2.0, sleep=sleeps.append, clock=lambda: 0.0,
+                                            max_rounds=rounds)
+        return fails, sleeps, out.getvalue()
+
+    def test_locked_database_is_retried_not_fatal(self):
+        stub = StubScanner([sqlite3.OperationalError("database is locked")])
+        fails, sleeps, out = self.run_loop(stub, 2)
+        self.assertEqual(stub.calls, 2)
+        self.assertEqual(sleeps, [2, 2.0])        # back-off 2s, then a normal 2s poll
+        self.assertEqual(fails, 0)                # second round succeeded
+        self.assertIn("OperationalError: database is locked", out)
+
+    def test_back_off_doubles_and_caps_at_30(self):
+        stub = StubScanner([RpcError("x")] * 6)
+        _, sleeps, _ = self.run_loop(stub, 6)
+        self.assertEqual(sleeps, [2, 4, 8, 16, 30, 30])
+
+    def test_real_bugs_are_not_swallowed(self):
+        stub = StubScanner([KeyError("bug")])
+        with self.assertRaises(KeyError):
+            self.run_loop(stub, 1)
 
 if __name__ == "__main__":
     unittest.main()

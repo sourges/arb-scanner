@@ -166,12 +166,18 @@ class Recorder:
     def startup(self):
         cfg = self.cfg
         for pair in getattr(cfg, "RECORD_PAIRS", []):
-            problems = dex.verify_tokens(self.rpc, cfg.MULTICALL3, [pair["a"], pair["b"]])
-            if problems:
-                self.log(f"recorder: skipping {pair['name']}: " + "; ".join(problems))
+            # Any failure here skips this pair only: the recorder must never stop the scanner.
+            try:
+                problems = dex.verify_tokens(self.rpc, cfg.MULTICALL3, [pair["a"], pair["b"]])
+                if problems:
+                    self.log(f"recorder: skipping {pair['name']}: " + "; ".join(problems))
+                    continue
+                pools = dex.discover_pools(self.rpc, cfg.MULTICALL3, cfg.DEXES,
+                                           pair["a"]["address"], pair["b"]["address"])
+            except Exception as e:
+                self.log(f"recorder: skipping {pair['name']} ({type(e).__name__}: {e}); "
+                         "restart the scanner to retry it")
                 continue
-            pools = dex.discover_pools(self.rpc, cfg.MULTICALL3, cfg.DEXES,
-                                       pair["a"]["address"], pair["b"]["address"])
             if not pools:
                 self.log(f"recorder: skipping {pair['name']}: no pools found")
                 continue

@@ -6,6 +6,7 @@ Run:  python scanner.py          scan until Ctrl+C, logging to arb_scanner.sqlit
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -187,26 +188,40 @@ def main(argv=None):
         scanner.shutdown()
         return
 
-    fails = 0
     try:
-        while True:
-            started = time.time()
-            try:
-                out = scanner.step()
-                fails = 0
-                if out:
-                    log(status_line(*out))
-            except (RpcError, RuntimeError, ValueError) as e:
-                fails += 1
-                wait = min(30, 2 ** fails)
-                log(f"round failed ({e}); retrying in {wait}s")
-                time.sleep(wait)
-                continue
-            time.sleep(max(0.0, config.POLL_SECONDS - (time.time() - started)))
+        run_forever(scanner, config.POLL_SECONDS)
     except KeyboardInterrupt:
         log("stopping: saving open episodes")
     finally:
         scanner.shutdown()
+
+
+# Errors that skip a round instead of stopping the scanner. sqlite3.OperationalError
+# covers "database is locked" if something holds the file longer than db.BUSY_TIMEOUT_S.
+RETRYABLE = (RpcError, RuntimeError, ValueError, sqlite3.OperationalError)
+
+
+def run_forever(scanner, poll_seconds, sleep=time.sleep, clock=time.time, max_rounds=None):
+    """Scan until Ctrl+C. A failed round waits 2, 4, 8 ... up to 30s, then tries again.
+    max_rounds is for tests; normal runs never stop on their own."""
+    fails = 0
+    rounds = 0
+    while max_rounds is None or rounds < max_rounds:
+        rounds += 1
+        started = clock()
+        try:
+            out = scanner.step()
+            fails = 0
+            if out:
+                log(status_line(*out))
+        except RETRYABLE as e:
+            fails += 1
+            wait = min(30, 2 ** fails)
+            log(f"round failed ({type(e).__name__}: {e}); retrying in {wait}s")
+            sleep(wait)
+            continue
+        sleep(max(0.0, poll_seconds - (clock() - started)))
+    return fails
 
 
 if __name__ == "__main__":

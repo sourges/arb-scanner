@@ -41,6 +41,22 @@ def make_recorder():
 
 
 class TestStartup(unittest.TestCase):
+    def test_rpc_failure_at_startup_skips_pairs_without_raising(self):
+        cfg = make_config()
+        chain = FakeChain()
+
+        def down(*_args, **_kw):
+            raise RpcError("eth_call: rate limited (HTTP 429)")
+
+        chain.eth_call = down
+        lines = []
+        rec = recorder.Recorder(cfg, chain, db.connect(":memory:"), lines.append)
+        rec.startup()                                   # must not raise
+        self.assertEqual(rec.pairs, [])
+        self.assertFalse(rec.due(0.0))
+        self.assertEqual(len(lines), len(cfg.RECORD_PAIRS))
+        self.assertIn("RpcError", lines[0])
+
     def test_skips_pairs_with_bad_tokens_and_keeps_the_rest(self):
         rec, _, lines = make_recorder()
         self.assertEqual([p["name"] for p, _ in rec.pairs], ["cbBTC/WBTC", "USDT/USDC"])

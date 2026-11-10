@@ -3,8 +3,16 @@ report.py, DB Browser for SQLite, or pandas.read_sql.
 
 connect() also upgrades an older database in place: missing tables and any
 episode columns added since it was created are added, so existing data is kept.
+
+WAL mode: the live database runs in SQLite's write-ahead-log mode, so a reader
+(report.py, export_db.py, a notebook) never blocks the scanner's writes. WAL
+keeps two side files next to the database, arb_scanner.sqlite-wal and -shm.
+They are part of the database: never delete them while the scanner runs, and
+never copy the .sqlite file alone. Use export_db.py for a copy.
 """
 import sqlite3
+
+BUSY_TIMEOUT_S = 10   # if the file is busy anyway, wait this long before giving up
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -48,7 +56,8 @@ EPISODE_PRICE_COLUMNS = ["start_mid", "best_mid", "best_buy_px", "best_sell_px"]
 
 
 def connect(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_S)
+    conn.execute("PRAGMA journal_mode=WAL")    # saved in the file; ":memory:" ignores it
     conn.executescript(SCHEMA)
     existing = {row[1] for row in conn.execute("PRAGMA table_info(episodes)")}
     for col in EPISODE_PRICE_COLUMNS:

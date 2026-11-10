@@ -62,5 +62,22 @@ class TestDb(unittest.TestCase):
         conn.close()
         db.connect(self.path).close()          # connecting again must not try to re-add columns
 
+    def test_file_database_uses_wal(self):
+        conn = db.connect(self.path)
+        self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        conn.close()
+
+    def test_open_reader_does_not_block_writes(self):
+        writer = db.connect(self.path)
+        reader = sqlite3.connect(self.path, timeout=0.2)
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM episodes").fetchall()     # read transaction left open
+        try:
+            db.insert_episodes(writer, [Episode("k", "ETH", 1, 0.0, 1, 0.0, 1, 0.1, 0.1, "A", "B")])
+        finally:
+            reader.close()
+        self.assertEqual(writer.execute("SELECT COUNT(*) FROM episodes").fetchone(), (1,))
+        writer.close()
+
 if __name__ == "__main__":
     unittest.main()
