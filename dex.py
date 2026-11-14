@@ -36,11 +36,25 @@ class PoolQuoteRaw:
 
 
 @dataclass
+class CrossQuoteRaw:
+    """One pool between two non-USDC tokens (e.g. WETH/cbBTC), quoted both ways.
+    a = first token, b = second token (see config.TRIANGLE_PAIRS)."""
+    pool: Pool
+    a_in_raw: int                   # a amount used for the a -> b quote
+    b_in_raw: int                   # b amount used for the b -> a quote
+    a_to_b_out_raw: int | None = None
+    a_to_b_gas: int | None = None
+    b_to_a_out_raw: int | None = None
+    b_to_a_gas: int | None = None
+
+
+@dataclass
 class RoundData:
     block: int
     basefee_wei: int
     l1_fee_wei: int | None
     quotes: dict = field(default_factory=dict)   # pair name -> [PoolQuoteRaw]
+    cross: list = field(default_factory=list)    # [CrossQuoteRaw] for the triangle's middle leg
 
 
 @dataclass
@@ -95,13 +109,17 @@ def discover_pools(rpc, multicall_addr: str, dexes, token_a: str, token_b: str):
     return pools
 
 
-def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd):
+def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd, cross=None):
     """pair_pools: {pair name: (pair cfg, [Pool])}. ref_prices: {pair name: USD price}.
 
     For each pool we quote both directions:
       buy  = TRADE_SIZE USDC -> base
       sell = x_base -> USDC, where x_base = TRADE_SIZE / reference price
     routes.py rescales the sell quote to the exact amount a buy produced.
+
+    cross (optional): (pair_a cfg, pair_b cfg, [Pool]) for pools between the two base
+    tokens (WETH/cbBTC). Each is quoted a -> b and b -> a at about TRADE_SIZE worth,
+    inside the SAME eth_call, so the triangle costs no extra RPC call.
     """
     usdc = cfg.USDC
     calls = [
@@ -124,6 +142,20 @@ def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd):
             calls.append((p.quoter, abi.encode_quote(p.kind, base["address"], usdc["address"], x_base_raw, p.tier)))
             layout.append((r, "sell"))
 
+    cross_raws = []
+    if cross:
+        pair_a, pair_b, cross_pools = cross
+        ta, tb = pair_a["base"], pair_b["base"]
+        a_in = int(size_usd / ref_prices[pair_a["name"]] * 10 ** ta["decimals"])
+        b_in = int(size_usd / ref_prices[pair_b["name"]] * 10 ** tb["decimals"])
+        for p in cross_pools:
+            c = CrossQuoteRaw(pool=p, a_in_raw=a_in, b_in_raw=b_in)
+            cross_raws.append(c)
+            calls.append((p.quoter, abi.encode_quote(p.kind, ta["address"], tb["address"], a_in, p.tier)))
+            layout.append((c, "a_to_b"))
+            calls.append((p.quoter, abi.encode_quote(p.kind, tb["address"], ta["address"], b_in, p.tier)))
+            layout.append((c, "b_to_a"))
+
     results = multicall(rpc, cfg.MULTICALL3, calls)
     (ok_b, ret_b), (ok_f, ret_f), (ok_l1, ret_l1) = results[:3]
     if not (ok_b and ok_f):
@@ -133,6 +165,7 @@ def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd):
         basefee_wei=abi.decode_uint(ret_f),
         l1_fee_wei=abi.decode_uint(ret_l1) if ok_l1 and len(ret_l1) >= 32 else None,
         quotes=raws,
+        cross=cross_raws,
     )
     for (r, side), (ok, ret) in zip(layout, results[3:]):
         if not ok or len(ret) < 128:
@@ -142,8 +175,12 @@ def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd):
             continue
         if side == "buy":
             r.buy_out_raw, r.buy_gas = out, gas
-        else:
+        elif side == "sell":
             r.sell_out_raw, r.sell_gas = out, gas
+        elif side == "a_to_b":
+            r.a_to_b_out_raw, r.a_to_b_gas = out, gas
+        else:
+            r.b_to_a_out_raw, r.b_to_a_gas = out, gas
     return rd
 
 

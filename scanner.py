@@ -17,6 +17,7 @@ import config
 import db
 import dex
 import recorder
+import triangle
 from routes import compute_routes
 from rpc import RpcClient, RpcError
 from tracker import EpisodeTracker, MinuteStats
@@ -42,6 +43,8 @@ class Scanner:
         self.book_failures = 0
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.recorder = recorder.Recorder(cfg, rpc, conn, log)
+        self.cross = None        # (pair_a cfg, pair_b cfg, [Pool]) for the triangle, or None
+        self.last_tri = []       # latest triangle results
 
     # ---- startup ------------------------------------------------------------------
 
@@ -66,6 +69,8 @@ class Scanner:
                 if d["name"] not in found:
                     log(f"  note: no {pair['name']} pools on {d['name']} (fine if it has none; check factory if it should)")
 
+        self.setup_triangle()
+
         self.fetch_books()
         self.update_ref_prices()
         missing = [p["name"] for p in cfg.PAIRS if p["name"] not in self.ref_prices]
@@ -73,6 +78,33 @@ class Scanner:
             raise SystemExit(f"No CEX price for {missing}: Kraken and Coinbase both unreachable?")
         log("reference prices: " + ", ".join(f"{k} ${v:,.2f}" for k, v in self.ref_prices.items()))
         self.recorder.startup()
+
+    def setup_triangle(self):
+        """Find the pools between the triangle's two tokens. No pools = triangle off, scanner runs on."""
+        names = getattr(self.cfg, "TRIANGLE_PAIRS", None)
+        if not names:
+            return
+        pairs = {p["name"]: p for p in self.cfg.PAIRS}
+        a, b = pairs.get(names[0]), pairs.get(names[1])
+        if a is None or b is None:
+            log(f"triangle off: TRIANGLE_PAIRS {names} must both be names in PAIRS")
+            return
+        pools = dex.discover_pools(self.rpc, self.cfg.MULTICALL3, self.cfg.DEXES,
+                                   a["base"]["address"], b["base"]["address"])
+        label = f"{a['base']['symbol']}/{b['base']['symbol']}"
+        if not pools:
+            log(f"triangle off: no {label} pools found")
+            return
+        self.cross = (a, b, pools)
+        log(f"triangle {label} pools: " + ", ".join(p.label for p in pools))
+
+    def compute_triangle(self, rd, eth_usd):
+        a, b, _pools = self.cross
+        a_to_b, b_to_a = triangle.cross_legs(self.cfg, rd, a, b, eth_usd)
+        return triangle.compute(self.cfg.TRADE_SIZE_USD, a["base"]["symbol"], b["base"]["symbol"],
+                                dex.to_dex_quotes(self.cfg, rd, a, eth_usd),
+                                dex.to_dex_quotes(self.cfg, rd, b, eth_usd),
+                                a_to_b, b_to_a)
 
     # ---- per round -----------------------------------------------------------------
 
@@ -102,7 +134,7 @@ class Scanner:
         cfg = self.cfg
         # Quote the chain and fetch the books at the same time.
         rd_job = self.pool.submit(dex.quote_round, self.rpc, cfg, self.pair_pools,
-                                  dict(self.ref_prices), cfg.TRADE_SIZE_USD)
+                                  dict(self.ref_prices), cfg.TRADE_SIZE_USD, self.cross)
         self.fetch_books()
         rd = rd_job.result()
         if rd.block == self.last_block:
@@ -119,6 +151,11 @@ class Scanner:
             for key, r in compute_routes(name, cfg.TRADE_SIZE_USD, quotes, books,
                                          cfg.CEX_FEES, cfg.REBALANCE_COST_USD).items():
                 results[(name, key)] = r
+
+        if self.cross:
+            self.last_tri = self.compute_triangle(rd, eth_usd)
+            if self.last_tri:
+                db.insert_tri(self.conn, now, rd.block, self.last_tri)
 
         closed = self.tracker.update(rd.block, now, results, dict(self.ref_prices))
         if closed:
@@ -152,7 +189,7 @@ def episode_line(e):
             f"cex mid {fmt_px(e.best_mid)}")
 
 
-def status_line(block, results):
+def status_line(block, results, tri=None):
     parts = [f"blk {block}"]
     by_pair = {}
     for (pair, _key), r in results.items():
@@ -160,6 +197,8 @@ def status_line(block, results):
             by_pair[pair] = r
     for pair, r in by_pair.items():
         parts.append(f"{pair} best {r.key} {r.net_pct:+.3f}%")
+    if tri is not None:
+        parts.append(triangle.best_line(tri))
     return " | ".join(parts)
 
 
@@ -184,6 +223,9 @@ def main(argv=None):
         if out:
             print_table(out[1])
             print()
+            if scanner.cross:
+                triangle.print_table(scanner.last_tri)
+                print()
             recorder.print_table(scanner.recorder.last_quotes)
         scanner.shutdown()
         return
@@ -213,7 +255,8 @@ def run_forever(scanner, poll_seconds, sleep=time.sleep, clock=time.time, max_ro
             out = scanner.step()
             fails = 0
             if out:
-                log(status_line(*out))
+                tri = getattr(scanner, "last_tri", None) if getattr(scanner, "cross", None) else None
+                log(status_line(*out, tri=tri))
         except RETRYABLE as e:
             fails += 1
             wait = min(30, 2 ** fails)

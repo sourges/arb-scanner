@@ -61,6 +61,13 @@ PAIRS = [
     },
 ]
 
+# ---- triangular arb (triangle.py) ------------------------------------------------
+# The two PAIRS names that form the triangle with USDC: USDC -> WETH -> cbBTC -> USDC
+# and the reverse. Their cross pools (WETH/cbBTC) are found at startup and quoted in
+# the same per-block eth_call. Every scan writes one row per loop to tri_quotes.
+# Set to None to turn the triangle off.
+TRIANGLE_PAIRS = ("ETH", "BTC")
+
 # ---- pegged-pair recorder (data for the stat-arb project) -----------------------
 # Once a minute, each pair below is quoted both ways on every pool and one row per
 # pool goes in the pegged_quotes table. Price is "B per 1 A", so it sits near 1.0.

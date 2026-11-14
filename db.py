@@ -1,4 +1,4 @@
-"""SQLite storage. One file (arb_scanner.sqlite), three tables. Open it with
+"""SQLite storage. One file (arb_scanner.sqlite), four tables. Open it with
 report.py, DB Browser for SQLite, or pandas.read_sql.
 
 connect() also upgrades an older database in place: missing tables and any
@@ -49,6 +49,25 @@ CREATE TABLE IF NOT EXISTS pegged_quotes (
     ask           REAL
 );
 CREATE INDEX IF NOT EXISTS idx_pegged_pair_ts ON pegged_quotes (pair, ts);
+-- Shared-format columns first (ts, strategy, venue, path, size_usd, raw_edge, net_edge),
+-- the same names every new collector uses so data can be combined later.
+-- Edges are % of size_usd.
+CREATE TABLE IF NOT EXISTS tri_quotes (
+    ts            REAL,
+    strategy      TEXT,
+    venue         TEXT,
+    path          TEXT,
+    size_usd      REAL,
+    raw_edge      REAL,
+    net_edge      REAL,
+    block         INTEGER,
+    usd_back      REAL,
+    gas_usd       REAL,
+    leg1          TEXT,
+    leg2          TEXT,
+    leg3          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tri_path_ts ON tri_quotes (path, ts);
 """
 
 # Columns added after v1. Older databases get them via ALTER TABLE (old rows read NULL).
@@ -93,5 +112,16 @@ def insert_pegged(conn, ts, block, quotes):
     conn.executemany(
         "INSERT INTO pegged_quotes (ts, block, pair, pool, bid, ask) VALUES (?,?,?,?,?,?)",
         [(ts, block, q.pair, q.pool, q.bid, q.ask) for q in quotes],
+    )
+    conn.commit()
+
+
+def insert_tri(conn, ts, block, results, strategy="tri_arb", venue="base"):
+    """Triangle rows: one per loop per scan (see triangle.py)."""
+    conn.executemany(
+        "INSERT INTO tri_quotes (ts, strategy, venue, path, size_usd, raw_edge, net_edge,"
+        " block, usd_back, gas_usd, leg1, leg2, leg3) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block,
+          r.usd_back, r.gas_usd, r.legs[0], r.legs[1], r.legs[2]) for r in results],
     )
     conn.commit()

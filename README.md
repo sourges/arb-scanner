@@ -24,6 +24,19 @@ net = USD back - $100 - CEX fee - Base gas - rebalance cost.
 DEX swap fees and slippage are inside the on-chain quotes.
 Maker routes assume the resting order fills at the best bid/ask (optimistic on purpose: that is the question being tested).
 
+## Triangle (three-way) arb
+
+Every scan the scanner also prices two loops that start and end in USDC:
+**USDC → WETH → cbBTC → USDC** and the reverse **USDC → cbBTC → WETH → USDC**.
+
+- Each leg uses the best pool for that leg, on any DEX (e.g. buy WETH on Uniswap, swap to cbBTC on Aerodrome, sell on PancakeSwap).
+- The WETH/cbBTC pools are found at startup and quoted inside the **same** per-block eth_call: no extra RPC calls.
+- Legs 2 and 3 scale a ~$100 quote to the exact amount the previous leg produced (accurate in deep pools; a profitable loop should be re-checked with chained quotes).
+- **raw_edge** = USDC back / $100 − 1, in %, with pool fees and slippage included but not gas. **net_edge** also subtracts gas for three separate swaps (cautious: one contract doing all three would pay less).
+- Rows go in the **tri_quotes** table, one row per loop per scan (~2 rows every 2s, roughly 86K rows a day). Columns start with the shared format used by every new collector: `ts, strategy ('tri_arb'), venue ('base'), path, size_usd, raw_edge, net_edge`, then `block, usd_back, gas_usd, leg1, leg2, leg3`.
+- The status line shows `TRI best <path> <net %>`; `python scanner.py --once` prints both loops with their pools.
+- Settings: `TRIANGLE_PAIRS` in `config.py` (`None` turns it off). No WETH/cbBTC pools found = triangle off with a log line; the scanner keeps running.
+
 ## Pegged-pair recorder (data for the stat-arb project)
 
 Once a minute (inside the normal scan loop) the scanner also quotes pairs of tokens
@@ -50,7 +63,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 76 tests ... OK)
+python -m unittest            (expect: Ran 100 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -68,6 +81,7 @@ python report.py --min-usd 0.10 --top 30
 - **episodes** table: each run of consecutive profitable scans for a route: samples, seconds, best net, and the prices at the best moment (buy price, sell price, CEX mid) so you can see which side moved. Lasting episodes are what a slower bot could catch. Base makes a block about every 0.2s and the scanner samples about every 2s, so read `samples`/`seconds`, not the block columns.
 - `report.py` skips episodes under `--min-usd` (default $0.05) as dust and lists the top episodes with their prices.
 - **minute_stats** table: per route per minute: samples, how many were > 0, best and average net %.
+- **tri_quotes** table: every scan's two triangle loops (see "Triangle" above). Not in `report.py` yet; open it with DB Browser for SQLite or pandas.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
 
 ## Sharing the data (stat-arb and other projects)
