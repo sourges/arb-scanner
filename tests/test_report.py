@@ -124,5 +124,58 @@ class TestReport(unittest.TestCase):
             opened[0].execute("SELECT 1")
 
 
+class TestProbeReport(unittest.TestCase):
+    """Two probes, sizes $100/$1,000 (net %):
+        ts 2000  ETH a>b   +0.60 / +0.20
+        ts 3000  BTC c>d   +0.10 / can't fill
+    $100: 2 probes, 2 filled, 2 > 0, median +0.35, best +0.60
+    $1,000: 2 probes, 1 filled, 1 > 0, median +0.20, best +0.20
+    top order by the $100 net: ETH first."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "p.sqlite")
+        self.conn = db.connect(self.path)
+        from probe import ProbeResult
+        def pr(pair, b, s, size, net):
+            usd_back = None if net is None else size * (1 + net / 100)
+            return ProbeResult(pair, b, s, size, 0.05, usd_back, 0.0)
+        db.insert_probes(self.conn, 3000.0, 2, "dex>dex", [pr("BTC", "c", "d", 100, 0.10), pr("BTC", "c", "d", 1000, None)])
+        db.insert_probes(self.conn, 2000.0, 1, "dex>dex", [pr("ETH", "a", "b", 100, 0.60), pr("ETH", "a", "b", 1000, 0.20)])
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_probe_summary(self):
+        (s100, s1000) = report.probe_summary(self.conn, 0)
+        self.assertEqual(s100[:4], (100.0, 2, 2, 2))
+        self.assertAlmostEqual(s100[4], 0.35)
+        self.assertAlmostEqual(s100[5], 0.60)
+        self.assertEqual(s1000[:4], (1000.0, 2, 1, 1))
+        self.assertAlmostEqual(s1000[4], 0.20)
+
+    def test_top_probes_order_and_cant_fill(self):
+        top = report.top_probes(self.conn, 0, 10)
+        self.assertEqual([t[1] for t in top], ["ETH a>b", "BTC c>d"])
+        self.assertIsNone(top[1][2][1000.0])
+
+    def test_main_prints_probe_section(self):
+        buf = io.StringIO()
+        with mock.patch.object(report.config, "DB_PATH", self.path), redirect_stdout(buf):
+            report.main([])
+        out = buf.getvalue()
+        self.assertIn("SIZE PROBES", out)
+        self.assertIn("ETH a>b", out)
+        self.assertIn("can't fill", out)
+
+    def test_database_without_probe_table(self):
+        old = os.path.join(self.tmp.name, "old.sqlite")
+        c = sqlite3.connect(old)
+        c.execute("CREATE TABLE x (a)")
+        self.assertEqual(report.probe_summary(c, 0), [])
+        self.assertEqual(report.top_probes(c, 0, 5), [])
+        c.close()
+
 if __name__ == "__main__":
     unittest.main()

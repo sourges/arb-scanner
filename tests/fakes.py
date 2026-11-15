@@ -66,6 +66,11 @@ class FakeChain:
             (UNI_QUOTER, 500, USDT, USDC): (1.0, 0.0001),      # no USDT pool on aero: reverts
         }
         self.quote_gas = 100_000
+        # size-probe depth model (empty = no slippage, every size fills):
+        # (quoter, tier, base) -> fraction the price moves per $1,000 traded
+        self.impact = {}
+        # (quoter, tier, base) -> largest USD size the pool can fill; above it the quote reverts
+        self.max_usd = {}
         self.calls = 0
 
     # -- RpcClient interface --
@@ -122,10 +127,15 @@ class FakeChain:
             if key not in self.prices:
                 raise Revert()
             price, fee = self.prices[key]
-            if tin == USDC:   # buy base
-                out = amount / 10 ** 6 / price * (1 - fee) * 10 ** DECIMALS[base]
-            else:             # sell base
-                out = amount / 10 ** DECIMALS[base] * price * (1 - fee) * 10 ** 6
+            # trade size in USD at the pool price; optional depth model for size probes
+            usd = amount / 10 ** 6 if tin == USDC else amount / 10 ** DECIMALS[base] * price
+            if usd > self.max_usd.get(key, float("inf")):
+                raise Revert()                    # pool can't fill this size
+            move = self.impact.get(key, 0.0) * usd / 1000   # price moves this fraction per $1,000
+            if tin == USDC:   # buy base: price pushed up
+                out = amount / 10 ** 6 / (price * (1 + move)) * (1 - fee) * 10 ** DECIMALS[base]
+            else:             # sell base: price pushed down
+                out = amount / 10 ** DECIMALS[base] * price * (1 - move) * (1 - fee) * 10 ** 6
             return encode(["uint256", "uint160", "uint32", "uint256"], [int(out), 0, 0, self.quote_gas])
         raise Revert()
 

@@ -68,6 +68,25 @@ CREATE TABLE IF NOT EXISTS tri_quotes (
     leg3          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tri_path_ts ON tri_quotes (path, ts);
+CREATE TABLE IF NOT EXISTS episode_probes (
+    ts            REAL,
+    strategy      TEXT,
+    venue         TEXT,
+    path          TEXT,
+    size_usd      REAL,
+    raw_edge      REAL,
+    net_edge      REAL,
+    block         INTEGER,
+    route         TEXT,
+    pair          TEXT,
+    buy_pool      TEXT,
+    sell_pool     TEXT,
+    usd_back      REAL,
+    gas_usd       REAL,
+    buy_px        REAL,
+    sell_px       REAL
+);
+CREATE INDEX IF NOT EXISTS idx_probe_ts ON episode_probes (ts);
 """
 
 # Columns added after v1. Older databases get them via ALTER TABLE (old rows read NULL).
@@ -123,5 +142,19 @@ def insert_tri(conn, ts, block, results, strategy="tri_arb", venue="base"):
         " block, usd_back, gas_usd, leg1, leg2, leg3) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block,
           r.usd_back, r.gas_usd, r.legs[0], r.legs[1], r.legs[2]) for r in results],
+    )
+    conn.commit()
+
+
+def insert_probes(conn, ts, block, route, results, strategy="dex_arb_probe", venue="base"):
+    """Size-probe rows: one per size (see probe.py). ts = the round the episode opened,
+    so a probe joins its episode on (pair, route, start_ts = ts). NULL edges = can't fill."""
+    conn.executemany(
+        "INSERT INTO episode_probes (ts, strategy, venue, path, size_usd, raw_edge, net_edge,"
+        " block, route, pair, buy_pool, sell_pool, usd_back, gas_usd, buy_px, sell_px)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block, route,
+          r.pair, r.buy_pool, r.sell_pool, r.usd_back, r.gas_usd, r.buy_px, r.sell_px)
+         for r in results],
     )
     conn.commit()

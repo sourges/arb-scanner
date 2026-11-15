@@ -84,6 +84,25 @@ python report.py --min-usd 0.10 --top 30
 - **tri_quotes** table: every scan's two triangle loops (see "Triangle" above). Not in `report.py` yet; open it with DB Browser for SQLite or pandas.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
 
+## Size probes (how much could a gap absorb?)
+
+Every route is scored at $100, and the gaps that show up are mostly on thin pools.
+So when a `dex>dex` episode opens at or above `PROBE_MIN_NET_PCT` (default +0.05% net),
+the same buy pool -> sell pool trade is re-quoted at `PROBE_SIZES_USD`
+($100, $500, $1,000, $2,500, $5,000) in one extra eth_call. One row per size goes in
+the `episode_probes` table (joins its episode on pair, route and `ts = start_ts`).
+"can't fill" means the pool couldn't take that size. The log prints one line:
+
+```
+PROBE ETH aero1-ts1>pcsv3-100: $100 +0.616% | $500 +0.40% | $1,000 +0.11% | $2,500 can't fill | ...
+```
+
+`report.py` shows a SIZE PROBES section: per size, how many probes filled and netted
+above zero, the median and best net %, and the top probed gaps side by side. The probe
+runs one RPC round trip after the scan, so its $100 number can differ slightly from the
+episode's; all sizes in one probe come from the same block. `PROBE_MAX_PER_HOUR` caps
+the extra calls; `PROBE_SIZES_USD = []` turns probing off.
+
 ## Sharing the data (stat-arb and other projects)
 
 The live database (`arb_scanner.sqlite`) belongs to the scanner. It runs in SQLite's

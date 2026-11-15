@@ -61,6 +61,16 @@ PAIRS = [
     },
 ]
 
+# ---- size probes (probe.py) ---------------------------------------------------------
+# When a dex>dex episode OPENS at or above PROBE_MIN_NET_PCT (net, after gas, at $100),
+# the same buy pool -> sell pool trade is quoted at each size below in ONE extra eth_call,
+# to see how much money the gap could absorb. Rows go in episode_probes.
+# PROBE_MAX_PER_HOUR caps the extra calls if the market goes wild. [] turns probing off.
+PROBE_SIZES_USD = [100, 500, 1000, 2500, 5000]
+PROBE_MIN_NET_PCT = 0.05
+PROBE_ROUTES = ("dex>dex",)
+PROBE_MAX_PER_HOUR = 60
+
 # ---- triangular arb (triangle.py) ------------------------------------------------
 # The two PAIRS names that form the triangle with USDC: USDC -> WETH -> cbBTC -> USDC
 # and the reverse. Their cross pools (WETH/cbBTC) are found at startup and quoted in

@@ -16,6 +16,7 @@ import cex
 import config
 import db
 import dex
+import probe
 import recorder
 import triangle
 from routes import compute_routes
@@ -43,6 +44,7 @@ class Scanner:
         self.book_failures = 0
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.recorder = recorder.Recorder(cfg, rpc, conn, log)
+        self.prober = probe.Prober(cfg, rpc, conn, log, clock)
         self.cross = None        # (pair_a cfg, pair_b cfg, [Pool]) for the triangle, or None
         self.last_tri = []       # latest triangle results
 
@@ -157,6 +159,8 @@ class Scanner:
             if self.last_tri:
                 db.insert_tri(self.conn, now, rd.block, self.last_tri)
 
+        # episodes opening this round, found before the tracker marks them open
+        opening = self.prober.openings(results, self.tracker.open)
         closed = self.tracker.update(rd.block, now, results, dict(self.ref_prices))
         if closed:
             db.insert_episodes(self.conn, closed)
@@ -165,6 +169,9 @@ class Scanner:
         rows = self.minutes.add(now, results)
         if rows:
             db.insert_minutes(self.conn, rows)
+        if opening:
+            self.prober.probe(now, rd.block, opening, self.pair_pools, dict(self.ref_prices),
+                              rd.basefee_wei, rd.l1_fee_wei)
         if self.recorder.due(now):
             quotes = self.recorder.record(now, dict(self.ref_prices))
             if quotes:

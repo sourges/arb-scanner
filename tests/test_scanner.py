@@ -196,5 +196,33 @@ class TestRunForever(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.run_loop(stub, 1)
 
+class TestSizeProbes(unittest.TestCase):
+    def test_probe_runs_once_when_an_episode_opens_and_joins_it(self):
+        s, chain, clock, _ = make_scanner()
+        chain.prices[(AERO_QUOTER, 100, WETH)] = (2020.0, 0.0005)    # 1% gap opens
+        chain.block, clock.t = 101, clock.t + 2
+        with redirect_stdout(io.StringIO()) as out:
+            s.step()
+            chain.block, clock.t = 102, clock.t + 2                  # same episode continues
+            s.step()
+            chain.prices[(AERO_QUOTER, 100, WETH)] = (2000.0, 0.0005)   # gap closes
+            chain.block, clock.t = 103, clock.t + 2
+            s.step()
+        probes = s.conn.execute("SELECT ts, path, size_usd FROM episode_probes").fetchall()
+        sizes = len(s.cfg.PROBE_SIZES_USD)
+        self.assertEqual(len(probes), sizes)                         # probed once, not twice
+        self.assertEqual({p[1] for p in probes}, {"ETH uni-500>aero-ts100"})
+        (start,) = s.conn.execute(
+            "SELECT start_ts FROM episodes WHERE route='dex>dex' AND pair='ETH'").fetchone()
+        self.assertEqual({p[0] for p in probes}, {start})            # joins on start_ts
+        self.assertIn("PROBE ETH uni-500>aero-ts100:", out.getvalue())
+        s.shutdown()
+
+    def test_quiet_market_makes_no_probes(self):
+        s, chain, clock, _ = make_scanner()
+        s.step()
+        self.assertEqual(s.conn.execute("SELECT COUNT(*) FROM episode_probes").fetchone(), (0,))
+        s.shutdown()
+
 if __name__ == "__main__":
     unittest.main()

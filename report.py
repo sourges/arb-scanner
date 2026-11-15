@@ -90,6 +90,52 @@ def pegged_summary(conn, since_ts):
     return sorted(out)
 
 
+def has_table(conn, name):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (name,)).fetchone() is not None
+
+
+def probe_summary(conn, since_ts):
+    """Per probe size: probes, how many filled, how many netted > 0, median and best net %."""
+    if not has_table(conn, "episode_probes"):
+        return []
+    per_size = {}
+    for size, net in conn.execute(
+            "SELECT size_usd, net_edge FROM episode_probes WHERE ts >= ?", (since_ts,)):
+        per_size.setdefault(size, []).append(net)
+    out = []
+    for size in sorted(per_size):
+        nets = per_size[size]
+        filled = [n for n in nets if n is not None]
+        out.append((size, len(nets), len(filled), sum(1 for n in filled if n > 0),
+                    statistics.median(filled) if filled else None,
+                    max(filled) if filled else None))
+    return out
+
+
+def top_probes(conn, since_ts, limit):
+    """Best probed gaps: [(ts, path, {size: net % or None})], ordered by the
+    smallest size's net %, best first."""
+    if not has_table(conn, "episode_probes"):
+        return []
+    probes = {}
+    for ts, path, size, net in conn.execute(
+            "SELECT ts, path, size_usd, net_edge FROM episode_probes WHERE ts >= ?", (since_ts,)):
+        probes.setdefault((ts, path), {})[size] = net
+
+    def first_net(item):
+        sizes = item[1]
+        net = sizes[min(sizes)]
+        return net if net is not None else float("-inf")
+
+    ranked = sorted(probes.items(), key=first_net, reverse=True)[:limit]
+    return [(ts, path, sizes) for (ts, path), sizes in ranked]
+
+
+def fmt_pct(v):
+    return f"{v:+.3f}%" if v is not None else "can't fill"
+
+
 def fmt_px(px):
     return f"{px:,.2f}" if px else "?"
 
@@ -134,6 +180,21 @@ def print_report(conn, since, min_usd, top):
 
     print("\n'sum best $' adds each episode's best moment once: an upper bound, not a P&L.")
     print("Prices show '?' for episodes logged before price tracking was added.")
+
+    print("\nSIZE PROBES (dex>dex gaps re-quoted at bigger sizes when they open; net after gas)")
+    sizes = probe_summary(conn, since)
+    if not sizes:
+        print("  none yet")
+    else:
+        print(f"{'size':>8}{'probes':>8}{'filled':>8}{'net>0':>7}{'median net':>13}{'best net':>12}")
+        for size, n, filled, pos, med, best in sizes:
+            print(f"{'$' + format(size, ',.0f'):>8}{n:>8}{filled:>8}{pos:>7}{fmt_pct(med):>13}{fmt_pct(best):>12}")
+        all_sizes = [row[0] for row in sizes]
+        print(f"\nTOP {top} PROBED GAPS (local time)")
+        print(f"{'start':<16}{'pair  buy>sell pool':<30}" + "".join(f"{'$' + format(z, ',.0f'):>12}" for z in all_sizes))
+        for ts, path, by_size in top_probes(conn, since, top):
+            start = time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
+            print(f"{start:<16}{path:<30}" + "".join(f"{fmt_pct(by_size[z]) if z in by_size else '-':>12}" for z in all_sizes))
 
     print("\nPEGGED PAIRS (recorder, once a minute; mid in bp away from 1.0, gap before gas)")
     print(f"{'pair':<14}{'minutes':>9}{'avg mid':>9}{'min':>8}{'max':>8}{'std':>7}{'gap>0':>8}{'best gap':>10}")
