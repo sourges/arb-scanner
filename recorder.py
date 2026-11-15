@@ -17,6 +17,17 @@ Across pools, each minute:
 
 One row per pool per minute goes in the pegged_quotes table.
 
+Pools come from two places:
+    config.DEXES                 v3-style pools (QuoterV2), shared with the main scan
+    config.RECORD_CLASSIC_DEXES  Aerodrome classic (v2-style) stable/volatile pools,
+                                 recorder-only, quoted with the pool's own getAmountOut
+Classic pools were added Nov 14, 2026: earlier minutes don't have them.
+
+Depth: each pool is also quoted at RECORD_DEPTH_USD (e.g. $1,000) in the same call.
+    round trip at a size = ask / bid - 1     (fees both ways + price impact)
+A deep pool's $1,000 round trip is about its $100 round trip; a thin pool's is much
+worse, or it can't fill at all. The best bid/ask (and so mid and gap) still use $100.
+
 Read-only and best-effort: a token that fails its check disables only that pair,
 and a failed minute is logged and skipped. The scanner keeps going either way.
 Resolution: amounts are whole token units, so at $100 an 8-decimal BTC token is
@@ -37,6 +48,8 @@ class PegQuote:
     pool: str
     bid: float | None
     ask: float | None
+    depth_bid: float | None = None   # same pool at RECORD_DEPTH_USD (None = off, or can't fill)
+    depth_ask: float | None = None
 
 
 @dataclass
@@ -72,30 +85,73 @@ def usd_per_unit(pair, ref_prices):
     return 1.0 if ref is None else ref_prices[ref]
 
 
-def _amount_out(result):
+def discover_classic_pools(rpc, multicall_addr, classic_dexes, token_a, token_b):
+    """Aerodrome classic: ask each factory for the stable and/or volatile pool.
+    Missing pools (zero address) are skipped. The pool itself is the quote target."""
+    wanted = [(d, stable) for d in classic_dexes for stable in d["stable"]]
+    calls = [(d["factory"], abi.encode_get_pool_classic(token_a, token_b, stable)) for d, stable in wanted]
+    pools = []
+    for (d, stable), (ok, ret) in zip(wanted, dex.multicall(rpc, multicall_addr, calls)):
+        if not ok or len(ret) < 32:
+            continue
+        addr = abi.decode_address(ret)
+        if addr != abi.ZERO_ADDRESS:
+            pools.append(dex.Pool(d["name"], "classic", 1 if stable else 0, addr, addr))
+    return pools
+
+
+def _quote_call(p, token_in, token_out, amount):
+    """(target, calldata) for one quote: QuoterV2 for v3-style pools, getAmountOut for classic."""
+    if p.kind == "classic":
+        return p.address, abi.encode_get_amount_out(amount, token_in)
+    return p.quoter, abi.encode_quote(p.kind, token_in, token_out, amount, p.tier)
+
+
+def _amount_out(result, kind):
+    """Amount out in raw units, or None if the call failed or returned 0."""
     ok, ret = result
-    if not ok or len(ret) < 128:
+    if not ok:
+        return None
+    if kind == "classic":
+        if len(ret) < 32:
+            return None
+        return abi.decode_uint(ret) or None
+    if len(ret) < 128:
         return None
     out, _gas = abi.decode_quote(ret)
     return out or None
 
 
-def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd):
+def _price(pair, x_a, y_b, b_out, a_out):
+    """(bid, ask) in B per 1 A from raw amounts; None where a quote is missing."""
+    a_dec, b_dec = pair["a"]["decimals"], pair["b"]["decimals"]
+    bid = (b_out / 10 ** b_dec) / (x_a / 10 ** a_dec) if b_out else None
+    ask = (y_b / 10 ** b_dec) / (a_out / 10 ** a_dec) if a_out else None
+    return bid, ask
+
+
+def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd, depth_usd=None):
     """pairs: [(pair cfg, [Pool])]. ONE eth_call for everything. Returns (block, [PegQuote]).
 
-    Pools that can't quote either direction are left out.
+    Each pool is quoted both ways at size_usd and, if depth_usd is set, both ways again
+    at depth_usd (4 quotes per pool, still one eth_call). Pools that can't quote either
+    direction at size_usd are left out.
     """
+    sizes = [size_usd] + ([depth_usd] if depth_usd else [])
     calls = [(cfg.MULTICALL3, abi.encode_no_args(abi.SIG_BLOCK_NUMBER))]
-    layout = []
+    layout = []   # (pair, pool, [(x_a, y_b, sell index, buy index) per size])
     for pair, pools in pairs:
         a, b = pair["a"], pair["b"]
         unit_usd = usd_per_unit(pair, ref_prices)
-        x_a = int(size_usd / unit_usd * 10 ** a["decimals"])   # A to sell
-        y_b = int(size_usd / unit_usd * 10 ** b["decimals"])   # B to spend
         for p in pools:
-            calls.append((p.quoter, abi.encode_quote(p.kind, a["address"], b["address"], x_a, p.tier)))
-            calls.append((p.quoter, abi.encode_quote(p.kind, b["address"], a["address"], y_b, p.tier)))
-            layout.append((pair, p, x_a, y_b))
+            per_size = []
+            for usd in sizes:
+                x_a = int(usd / unit_usd * 10 ** a["decimals"])   # A to sell
+                y_b = int(usd / unit_usd * 10 ** b["decimals"])   # B to spend
+                calls.append(_quote_call(p, a["address"], b["address"], x_a))
+                calls.append(_quote_call(p, b["address"], a["address"], y_b))
+                per_size.append((x_a, y_b, len(calls) - 2, len(calls) - 1))
+            layout.append((pair, p, per_size))
 
     results = dex.multicall(rpc, cfg.MULTICALL3, calls)
     ok_b, ret_b = results[0]
@@ -104,15 +160,15 @@ def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd):
     block = abi.decode_uint(ret_b)
 
     quotes = []
-    for i, (pair, p, x_a, y_b) in enumerate(layout):
-        a_dec, b_dec = pair["a"]["decimals"], pair["b"]["decimals"]
-        b_out = _amount_out(results[1 + 2 * i])   # selling A
-        a_out = _amount_out(results[2 + 2 * i])   # buying A
-        bid = (b_out / 10 ** b_dec) / (x_a / 10 ** a_dec) if b_out else None
-        ask = (y_b / 10 ** b_dec) / (a_out / 10 ** a_dec) if a_out else None
+    for pair, p, per_size in layout:
+        prices = [_price(pair, x_a, y_b, _amount_out(results[i_sell], p.kind),
+                         _amount_out(results[i_buy], p.kind))
+                  for x_a, y_b, i_sell, i_buy in per_size]
+        bid, ask = prices[0]
         if bid is None and ask is None:
             continue
-        quotes.append(PegQuote(pair["name"], p.label, bid, ask))
+        depth_bid, depth_ask = prices[1] if len(prices) > 1 else (None, None)
+        quotes.append(PegQuote(pair["name"], p.label, bid, ask, depth_bid, depth_ask))
     return block, quotes
 
 
@@ -142,14 +198,24 @@ def summary_line(quotes):
     return "PEG " + " | ".join(parts)
 
 
-def print_table(quotes):
-    """Every pool's quote (used by scanner.py --once for a sanity check)."""
-    print(f"{'pegged pair':<14}{'pool':<16}{'bid':>12}{'ask':>12}{'pool spread bp':>16}")
+def round_trip_bp(bid, ask):
+    """Cost of buying then selling on one pool, in bp (fees both ways + price impact)."""
+    return (ask / bid - 1) * 1e4 if bid and ask else None
+
+
+def print_table(quotes, depth_usd=None):
+    """Every pool's quote (used by scanner.py --once for a sanity check).
+    'rt' = round trip on that pool in bp; a thin pool's bigger-size round trip blows up."""
+    big = f"rt bp ${depth_usd:,.0f}" if depth_usd else "rt bp big"
+    print(f"{'pegged pair':<14}{'pool':<16}{'bid':>12}{'ask':>12}{'rt bp $100':>12}{big:>14}")
     for q in quotes:
         bid = f"{q.bid:.6f}" if q.bid is not None else "-"
         ask = f"{q.ask:.6f}" if q.ask is not None else "-"
-        spread = f"{(q.ask / q.bid - 1) * 1e4:.1f}" if q.bid and q.ask else "-"
-        print(f"{q.pair:<14}{q.pool:<16}{bid:>12}{ask:>12}{spread:>16}")
+        rt = round_trip_bp(q.bid, q.ask)
+        rt_big = round_trip_bp(q.depth_bid, q.depth_ask)
+        print(f"{q.pair:<14}{q.pool:<16}{bid:>12}{ask:>12}"
+              f"{f'{rt:.1f}' if rt is not None else '-':>12}"
+              f"{f'{rt_big:.1f}' if rt_big is not None else '-':>14}")
 
 
 class Recorder:
@@ -162,6 +228,7 @@ class Recorder:
         self.last_minute = None
         self.last_quotes = []
         self.failures = 0
+        self.depth_usd = getattr(cfg, "RECORD_DEPTH_USD", None)
 
     def startup(self):
         cfg = self.cfg
@@ -174,6 +241,10 @@ class Recorder:
                     continue
                 pools = dex.discover_pools(self.rpc, cfg.MULTICALL3, cfg.DEXES,
                                            pair["a"]["address"], pair["b"]["address"])
+                classic = getattr(cfg, "RECORD_CLASSIC_DEXES", [])
+                if classic:
+                    pools += discover_classic_pools(self.rpc, cfg.MULTICALL3, classic,
+                                                    pair["a"]["address"], pair["b"]["address"])
             except Exception as e:
                 self.log(f"recorder: skipping {pair['name']} ({type(e).__name__}: {e}); "
                          "restart the scanner to retry it")
@@ -192,11 +263,11 @@ class Recorder:
         self.last_minute = int(now // self.cfg.RECORD_SECONDS)   # set first: a failure waits a minute
         try:
             block, quotes = quote_pegged(self.rpc, self.cfg, self.pairs, ref_prices,
-                                         self.cfg.RECORD_SIZE_USD)
+                                         self.cfg.RECORD_SIZE_USD, self.depth_usd)
         except Exception as e:      # RPC error, missing reference price, bad reply...
             self.failures += 1
             self.log(f"recorder: minute skipped ({type(e).__name__}: {e})")
             return []
-        db.insert_pegged(self.conn, now, block, quotes)
+        db.insert_pegged(self.conn, now, block, quotes, self.depth_usd)
         self.last_quotes = quotes
         return quotes

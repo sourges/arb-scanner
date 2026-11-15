@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS pegged_quotes (
     pair          TEXT,
     pool          TEXT,
     bid           REAL,
-    ask           REAL
+    ask           REAL,
+    depth_usd     REAL,
+    depth_bid     REAL,
+    depth_ask     REAL
 );
 CREATE INDEX IF NOT EXISTS idx_pegged_pair_ts ON pegged_quotes (pair, ts);
 -- Shared-format columns first (ts, strategy, venue, path, size_usd, raw_edge, net_edge),
@@ -91,6 +94,8 @@ CREATE INDEX IF NOT EXISTS idx_probe_ts ON episode_probes (ts);
 
 # Columns added after v1. Older databases get them via ALTER TABLE (old rows read NULL).
 EPISODE_PRICE_COLUMNS = ["start_mid", "best_mid", "best_buy_px", "best_sell_px"]
+# Pool depth (Nov 14, 2026): the same pool quoted at a bigger size. Older rows read NULL.
+PEGGED_DEPTH_COLUMNS = ["depth_usd", "depth_bid", "depth_ask"]
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -101,6 +106,10 @@ def connect(path: str) -> sqlite3.Connection:
     for col in EPISODE_PRICE_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE episodes ADD COLUMN {col} REAL")
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(pegged_quotes)")}
+    for col in PEGGED_DEPTH_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE pegged_quotes ADD COLUMN {col} REAL")
     conn.commit()
     return conn
 
@@ -126,11 +135,14 @@ def insert_minutes(conn, rows):
     conn.commit()
 
 
-def insert_pegged(conn, ts, block, quotes):
-    """Recorder rows: one per pool per minute (price = B per 1 A, see recorder.py)."""
+def insert_pegged(conn, ts, block, quotes, depth_usd=None):
+    """Recorder rows: one per pool per minute (price = B per 1 A, see recorder.py).
+    depth_usd: the bigger size each pool was also quoted at (None = depth quotes off)."""
     conn.executemany(
-        "INSERT INTO pegged_quotes (ts, block, pair, pool, bid, ask) VALUES (?,?,?,?,?,?)",
-        [(ts, block, q.pair, q.pool, q.bid, q.ask) for q in quotes],
+        "INSERT INTO pegged_quotes (ts, block, pair, pool, bid, ask, depth_usd, depth_bid, depth_ask)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        [(ts, block, q.pair, q.pool, q.bid, q.ask, depth_usd if depth_usd else None,
+          q.depth_bid, q.depth_ask) for q in quotes],
     )
     conn.commit()
 

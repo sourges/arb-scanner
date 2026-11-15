@@ -24,12 +24,17 @@ UNI_FACTORY = "0x" + "a1" * 20
 UNI_QUOTER = "0x" + "a2" * 20
 SLIP_FACTORY = "0x" + "b1" * 20
 SLIP_QUOTER = "0x" + "b2" * 20
+CLASSIC_FACTORY = "0x" + "d1" * 20
+CLASSIC_USDT_STABLE = "0x" + "d2" * 20   # Aerodrome-classic-style USDT/USDC stable pool
 
 SEL = {name: abi.selector(sig) for name, sig in {
     "agg": abi.SIG_AGGREGATE3, "pool_uni": abi.SIG_GET_POOL_UNI, "pool_slip": abi.SIG_GET_POOL_SLIP,
     "q_uni": abi.SIG_QUOTE_UNI, "q_slip": abi.SIG_QUOTE_SLIP, "symbol": abi.SIG_SYMBOL,
     "decimals": abi.SIG_DECIMALS, "block": abi.SIG_BLOCK_NUMBER, "basefee": abi.SIG_BASEFEE,
-    "l1": abi.SIG_L1_FEE_UPPER}.items()}
+    "l1": abi.SIG_L1_FEE_UPPER, "pool_classic": abi.SIG_GET_POOL_CLASSIC,
+    "amount_out": abi.SIG_GET_AMOUNT_OUT}.items()}
+
+USD_PER_UNIT = {USDC: 1.0, USDT: 1.0, CBBTC: 60000.0, WBTC: 60000.0}   # for pegged depth models
 
 DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8, WBTC: 8, USDT: 6}
 
@@ -65,6 +70,15 @@ class FakeChain:
             (SLIP_QUOTER, 100, CBBTC, WBTC): (1.0003, 0.0001),
             (UNI_QUOTER, 500, USDT, USDC): (1.0, 0.0001),      # no USDT pool on aero: reverts
         }
+        # Aerodrome classic: (frozenset of the two tokens, stable) -> pool address; missing = none
+        self.classic_pools = {(frozenset({USDT, USDC}), True): CLASSIC_USDT_STABLE}
+        # classic pool -> (token A, token B, price of A in B, fee fraction)
+        self.classic = {CLASSIC_USDT_STABLE: (USDT, USDC, 0.9999, 0.0005)}
+        # pegged depth model, keyed like self.pegged, or by classic pool address:
+        #   peg_impact: fraction the price moves per $1,000 traded (empty = no slippage)
+        #   peg_max_usd: largest USD size the pool can fill; above it the quote reverts
+        self.peg_impact = {}
+        self.peg_max_usd = {}
         self.quote_gas = 100_000
         # size-probe depth model (empty = no slippage, every size fills):
         # (quoter, tier, base) -> fraction the price moves per $1,000 traded
@@ -108,18 +122,32 @@ class FakeChain:
             t = "uint24" if sel == SEL["pool_uni"] else "int24"
             _a, _b, tier = decode(["address", "address", t], args)
             return encode(["address"], [self.pools.get((target, tier), abi.ZERO_ADDRESS)])
+        if target == CLASSIC_FACTORY and sel == SEL["pool_classic"]:
+            a, b, stable = decode(["address", "address", "bool"], args)
+            pool = self.classic_pools.get((frozenset({a.lower(), b.lower()}), bool(stable)))
+            return encode(["address"], [pool or abi.ZERO_ADDRESS])
+        if target in self.classic and sel == SEL["amount_out"]:
+            amount, tin = decode(["uint256", "address"], args)
+            a, b, price, fee = self.classic[target]
+            tin = tin.lower()
+            if tin not in (a, b):
+                raise Revert()
+            tout = b if tin == a else a
+            return encode(["uint256"], [self._peg_out(target, amount, tin, tout, price if tin == a else 1 / price, fee)])
         if sel in (SEL["q_uni"], SEL["q_slip"]):
             t = "uint24" if sel == SEL["q_uni"] else "int24"
             ((tin, tout, amount, tier, _limit),) = decode([f"(address,address,uint256,{t},uint160)"], args)
             tin, tout = tin.lower(), tout.lower()
             if (target, tier, tin, tout) in self.pegged:      # selling A for B
-                price, fee = self.pegged[(target, tier, tin, tout)]
-                out = amount / 10 ** DECIMALS[tin] * price * (1 - fee) * 10 ** DECIMALS[tout]
-                return encode(["uint256", "uint160", "uint32", "uint256"], [int(out), 0, 0, self.quote_gas])
+                key = (target, tier, tin, tout)
+                price, fee = self.pegged[key]
+                out = self._peg_out(key, amount, tin, tout, price, fee)
+                return encode(["uint256", "uint160", "uint32", "uint256"], [out, 0, 0, self.quote_gas])
             if (target, tier, tout, tin) in self.pegged:      # buying A with B
-                price, fee = self.pegged[(target, tier, tout, tin)]
-                out = amount / 10 ** DECIMALS[tin] / price * (1 - fee) * 10 ** DECIMALS[tout]
-                return encode(["uint256", "uint160", "uint32", "uint256"], [int(out), 0, 0, self.quote_gas])
+                key = (target, tier, tout, tin)
+                price, fee = self.pegged[key]
+                out = self._peg_out(key, amount, tin, tout, 1 / price, fee)
+                return encode(["uint256", "uint160", "uint32", "uint256"], [out, 0, 0, self.quote_gas])
             if USDC not in (tin, tout):
                 raise Revert()
             base = tout if tin == USDC else tin
@@ -139,6 +167,17 @@ class FakeChain:
             return encode(["uint256", "uint160", "uint32", "uint256"], [int(out), 0, 0, self.quote_gas])
         raise Revert()
 
+    def _peg_out(self, key, amount, tin, tout, rate, fee):
+        """Pegged swap: amount of tin -> raw tout at `rate` (tout per tin), minus fee and the
+        optional depth model. Raises Revert above peg_max_usd[key]."""
+        move = 0.0
+        if key in self.peg_max_usd or key in self.peg_impact:    # depth model only when set
+            usd = amount / 10 ** DECIMALS[tin] * USD_PER_UNIT[tin]
+            if usd > self.peg_max_usd.get(key, float("inf")):
+                raise Revert()
+            move = self.peg_impact.get(key, 0.0) * usd / 1000
+        return int(amount / 10 ** DECIMALS[tin] * rate * (1 - fee) * (1 - move) * 10 ** DECIMALS[tout])
+
 
 def make_config(**overrides):
     """config values with the fake chain's two DEXes."""
@@ -148,6 +187,7 @@ def make_config(**overrides):
         {"name": "aero", "kind": "slip", "factory": SLIP_FACTORY, "quoter": SLIP_QUOTER, "tiers": [50, 100]},
     ]
     cfg.DB_PATH = ":memory:"
+    cfg.RECORD_CLASSIC_DEXES = []   # tests that want classic pools pass the fake factory
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg

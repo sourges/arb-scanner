@@ -86,6 +86,10 @@ TRIANGLE_PAIRS = ("ETH", "BTC")
 # it does not stop the scanner.
 RECORD_SECONDS = 60
 RECORD_SIZE_USD = 100.0
+# Each pool is also quoted at this size in the same call (depth_bid/depth_ask columns):
+# a deep pool's $1,000 price is close to its $100 price; a thin pool's is much worse.
+# None turns the depth quotes off.
+RECORD_DEPTH_USD = 1000.0
 
 WBTC = {"address": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c", "symbol": "WBTC", "decimals": 8}
 USDT = {"address": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", "symbol": "USDT", "decimals": 6}
@@ -97,6 +101,16 @@ RECORD_PAIRS = [
     {"name": "USDT/USDC",  "a": USDT,  "b": USDC, "usd_ref": None},
     {"name": "USDbC/USDC", "a": USDBC, "b": USDC, "usd_ref": None},
     {"name": "DAI/USDC",   "a": DAI,   "b": USDC, "usd_ref": None},
+]
+
+# Aerodrome classic (v2-style) pools, for the RECORDER ONLY: the 2-second scan, triangle
+# and size probes use DEXES below and never see these. One stable pool and one volatile
+# pool can exist per token pair; each is looked up with getPool(a, b, stable) and quoted
+# with the pool's own getAmountOut (fee already taken out). Added Nov 14, 2026.
+# Address from github.com/aerodrome-finance/contracts (deployment table).
+RECORD_CLASSIC_DEXES = [
+    {"name": "aeroc", "factory": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da",
+     "stable": [True, False]},
 ]
 
 # kind "uni"  = Uniswap-v3-style pools keyed by fee tier (in hundredths of a bip: 500 = 0.05%)

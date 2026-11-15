@@ -179,3 +179,74 @@ class TestProbeReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPeggedPools(unittest.TestCase):
+    """PEGGED POOLS, hand-worked (cbBTC/WBTC, depth size $1,000):
+
+    ts 2000: pool A bid 0.9997 ask 0.9999, $1,000: 0.9990 / 1.0006
+             pool B bid 1.0002 ask 1.0004, $1,000: can't fill
+             best bid B, best ask A
+    ts 2060: pool A bid 0.9996 ask 0.9998, $1,000: 0.9990 / 1.0004 (best both sides)
+    pool A: best bid 1 of 2 minutes = 50%, best ask 2 of 2 = 100%
+            rt $100 = median(0.9999/0.9997 - 1, 0.9998/0.9996 - 1) = median(2.0006, 2.0008) = 2.0007 bp
+            rt $1,000 = median(1.0006/0.9990 - 1, 1.0004/0.9990 - 1) = median(16.016, 14.014) = 15.015 bp
+            filled 2 of 2 = 100%
+    pool B: best bid 50%, best ask 0%, rt $100 = 1.0004/1.0002 - 1 = 1.9996 bp,
+            rt $1,000 none, filled 0 of 1 = 0%
+    """
+
+    def setUp(self):
+        self.conn = db.connect(":memory:")
+        db.insert_pegged(self.conn, 2000.0, 1, [
+            PegQuote("cbBTC/WBTC", "A", 0.9997, 0.9999, 0.9990, 1.0006),
+            PegQuote("cbBTC/WBTC", "B", 1.0002, 1.0004, None, None)], depth_usd=1000.0)
+        db.insert_pegged(self.conn, 2060.0, 2, [
+            PegQuote("cbBTC/WBTC", "A", 0.9996, 0.9998, 0.9990, 1.0004)], depth_usd=1000.0)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_hand_worked(self):
+        rows = {r[1]: r for r in report.pegged_pools(self.conn, 0)}
+        _, _, n, bid_w, ask_w, rt, rt_big, filled, size = rows["A"]
+        self.assertEqual((n, size), (2, 1000.0))
+        self.assertAlmostEqual(bid_w, 50.0)
+        self.assertAlmostEqual(ask_w, 100.0)
+        self.assertAlmostEqual(rt, 2.0007, places=3)
+        self.assertAlmostEqual(rt_big, 15.015, places=3)
+        self.assertAlmostEqual(filled, 100.0)
+        _, _, n, bid_w, ask_w, rt, rt_big, filled, _ = rows["B"]
+        self.assertEqual(n, 1)
+        self.assertAlmostEqual(bid_w, 50.0)
+        self.assertAlmostEqual(ask_w, 0.0)
+        self.assertAlmostEqual(rt, 1.9996, places=3)
+        self.assertIsNone(rt_big)
+        self.assertAlmostEqual(filled, 0.0)
+
+    def test_price_setting_pool_listed_first(self):
+        self.assertEqual([r[1] for r in report.pegged_pools(self.conn, 0)], ["A", "B"])
+
+    def test_old_table_without_depth_columns(self):
+        raw = sqlite3.connect(":memory:")
+        raw.execute("CREATE TABLE pegged_quotes (ts REAL, block INTEGER, pair TEXT,"
+                    " pool TEXT, bid REAL, ask REAL)")
+        raw.execute("INSERT INTO pegged_quotes VALUES (1.0, 1, 'USDT/USDC', 'x', 0.9999, 1.0001)")
+        (row,) = report.pegged_pools(raw, 0)
+        raw.close()
+        self.assertEqual((row[6], row[7], row[8]), (None, None, None))
+        self.assertAlmostEqual(row[5], 2.0002, places=3)
+
+    def test_print_shows_section_and_dead_pools(self):
+        db.insert_pegged(self.conn, 2060.0, 2, [
+            PegQuote("cbBTC/WBTC", "dead", 0.03, 270.0, None, None)], depth_usd=1000.0)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            report.print_report(self.conn, 0, 0.05, 15)
+        out = buf.getvalue()
+        self.assertIn("PEGGED POOLS", out)
+        self.assertIn("rt $1,000", out)
+        line_a = next(x for x in out.splitlines() if x.startswith("cbBTC/WBTC") and " A " in x)
+        self.assertEqual(line_a.split()[-3:], ["2.0", "15.0", "100%"])
+        line_dead = next(x for x in out.splitlines() if " dead " in x)
+        self.assertIn("dead", line_dead.split()[-3])

@@ -233,7 +233,7 @@ def main(argv=None):
             if scanner.cross:
                 triangle.print_table(scanner.last_tri)
                 print()
-            recorder.print_table(scanner.recorder.last_quotes)
+            recorder.print_table(scanner.recorder.last_quotes, scanner.recorder.depth_usd)
         scanner.shutdown()
         return
 

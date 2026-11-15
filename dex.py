@@ -15,13 +15,15 @@ import abi
 @dataclass
 class Pool:
     dex: str
-    kind: str        # "uni" or "slip"
-    tier: int        # fee tier (uni) or tick spacing (slip)
+    kind: str        # "uni" or "slip" (scanner DEXES); "classic" is recorder-only, see recorder.py
+    tier: int        # fee tier (uni), tick spacing (slip), or 1 = stable / 0 = volatile (classic)
     address: str
     quoter: str
 
     @property
     def label(self) -> str:
+        if self.kind == "classic":
+            return f"{self.dex}-{'stable' if self.tier else 'vol'}"
         return f"{self.dex}-{'ts' if self.kind == 'slip' else ''}{self.tier}"
 
 

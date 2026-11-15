@@ -46,9 +46,17 @@ Each pair is quoted both ways on every pool, $100 a side, in ONE extra eth_call.
 - Price is "B per 1 A", so it sits near 1.0. **bid** = what selling A gets, **ask** = what buying A costs (pool fee included).
 - **mid** = (best bid + best ask) / 2 across pools: the series stat arb studies. Shown in bp away from 1.0.
 - **gap** = best bid / best ask - 1: above 0 means buying on one pool and selling on another nets something before gas.
-- Rows go in the **pegged_quotes** table (ts, block, pair, pool, bid, ask); the log prints one `PEG ...` line a minute.
+- Rows go in the **pegged_quotes** table (ts, block, pair, pool, bid, ask, depth_usd, depth_bid, depth_ask); the log prints one `PEG ...` line a minute.
 - A pair whose tokens fail the on-chain check is skipped with a log line; a failed minute is skipped. Neither stops the scanner.
-- Pairs live in `RECORD_PAIRS` in `config.py`. Only v3-style pools are seen (same as the scanner), so Aerodrome's classic stable pools are not included yet.
+- Pairs live in `RECORD_PAIRS` in `config.py`.
+- **Pools:** every v3-style pool from `DEXES` (shared with the scan), plus **Aerodrome classic** stable and volatile pools from `RECORD_CLASSIC_DEXES`. Classic pools are recorder-only: the 2-second scan, triangle and size probes never see them. They're quoted with the pool's own `getAmountOut` (fee included); labels `aeroc-stable` / `aeroc-vol`.
+- **Depth:** each pool is also quoted at `RECORD_DEPTH_USD` ($1,000) in the same call, stored as depth_bid / depth_ask. A deep pool's $1,000 round trip (ask / bid - 1) is about its $100 one; a thin pool's blows up or can't fill. Best bid/ask, mid and gap still use $100.
+- `report.py` **PEGGED POOLS** lists every pool: % of minutes it set the best bid / ask, round trip at $100 and $1,000, and how often $1,000 filled. "dead" = a round trip over 100,000 bp.
+
+**Pool set changed Nov 14, 2026** (commit after 5e969cc): Aerodrome classic pools and the depth
+columns start then. Earlier pegged rows have no classic pools and NULL depth, so best bid/ask
+before and after aren't strictly comparable. For a like-for-like series, filter out pools
+labelled `aeroc-*`. The 2-second scan's pool set did not change.
 
 ## How prices are measured
 
@@ -63,7 +71,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 100 tests ... OK)
+python -m unittest            (expect: Ran 136 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -128,4 +136,5 @@ All in `config.py` (trade size, fee tiers, rebalance cost, pairs, DEXs, gas mode
 
 ## Not included yet
 
-Uniswap v4 and other singleton-style DEXs, Aerodrome classic (v2-style) pools, extra pairs, execution of any kind.
+Uniswap v4 and other singleton-style DEXs; Aerodrome classic pools in the 2-second scan (recorder only);
+Solidly V3 and BaseSwap V3 (no verified quoter address on Base yet); extra pairs; execution of any kind.

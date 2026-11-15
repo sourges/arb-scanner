@@ -8,6 +8,8 @@ Run:  python report.py                      whole history
 The last section summarizes the pegged-pair recorder (one quote per minute per
 pool): where each pair's mid sits versus 1.0, how much it wanders, and how often
 the best bid on one pool beat the best ask on another (a gross gap, before gas).
+PEGGED POOLS then lists every pool: how often it set the best price, and its
+round trip at $100 and at the bigger depth size (a thin pool's blows up).
 
 Episodes below --min-usd (default $0.05) are counted as dust and left out of
 the episode tables, so the few real opportunities aren't buried.
@@ -88,6 +90,59 @@ def pegged_summary(conn, since_ts):
         out.append((pair, len(vals), statistics.fmean(mids), min(mids), max(mids),
                     statistics.pstdev(mids), sum(1 for g in gaps if g > 0), max(gaps)))
     return sorted(out)
+
+
+def pegged_pools(conn, since_ts):
+    """Per pair and pool: rows, % of minutes it set the best bid / best ask, and its
+    median round trip (ask / bid - 1, in bp) at $100 and at the depth size.
+    A thin pool shows a big jump from the $100 round trip to the bigger one, or
+    'filled' well under 100% (it couldn't fill the bigger size).
+    Depth columns are NULL before Nov 14, 2026 and show as '-'."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pegged_quotes)")}
+    depth = "depth_usd, depth_bid, depth_ask" if "depth_bid" in cols else "NULL, NULL, NULL"
+    rows = conn.execute(f"SELECT pair, ts, pool, bid, ask, {depth} FROM pegged_quotes"
+                        " WHERE ts >= ?", (since_ts,)).fetchall()
+    best = {}   # (pair, ts) -> [best bid, its pool, best ask, its pool]
+    for pair, ts, pool, bid, ask, *_ in rows:
+        b = best.setdefault((pair, ts), [None, None, None, None])
+        if bid is not None and (b[0] is None or bid > b[0]):
+            b[0], b[1] = bid, pool
+        if ask is not None and (b[2] is None or ask < b[2]):
+            b[2], b[3] = ask, pool
+    minutes = {}
+    for (pair, _ts) in best:
+        minutes[pair] = minutes.get(pair, 0) + 1
+    stats_ = {}
+    for pair, ts, pool, bid, ask, d_usd, d_bid, d_ask in rows:
+        s = stats_.setdefault((pair, pool), {"n": 0, "bid_wins": 0, "ask_wins": 0, "rt": [],
+                                             "rt_big": [], "big_tried": 0, "size": None})
+        s["n"] += 1
+        b = best[(pair, ts)]
+        s["bid_wins"] += b[1] == pool
+        s["ask_wins"] += b[3] == pool
+        if bid and ask:
+            s["rt"].append((ask / bid - 1) * 1e4)
+        if d_usd:
+            s["big_tried"] += 1
+            s["size"] = d_usd
+            if d_bid and d_ask:
+                s["rt_big"].append((d_ask / d_bid - 1) * 1e4)
+    out = []
+    for (pair, pool), s in stats_.items():
+        m = minutes[pair]
+        out.append((pair, pool, s["n"], 100 * s["bid_wins"] / m, 100 * s["ask_wins"] / m,
+                    statistics.median(s["rt"]) if s["rt"] else None,
+                    statistics.median(s["rt_big"]) if s["rt_big"] else None,
+                    100 * len(s["rt_big"]) / s["big_tried"] if s["big_tried"] else None,
+                    s["size"]))
+    # per pair: pools that set prices first, then by $100 round trip
+    return sorted(out, key=lambda r: (r[0], -(r[3] + r[4]), r[5] if r[5] is not None else float("inf")))
+
+
+def fmt_bp(v):
+    if v is None:
+        return "-"
+    return f"{v:,.1f}" if v < 100_000 else "dead"
 
 
 def has_table(conn, name):
@@ -203,6 +258,16 @@ def print_report(conn, since, min_usd, top):
         print("  none yet")
     for pair, n, avg, lo, hi, std, pos, best in pegs:
         print(f"{pair:<14}{n:>9}{avg:>+9.1f}{lo:>+8.1f}{hi:>+8.1f}{std:>7.1f}{pos:>8}{best:>+10.1f}")
+
+    pools = pegged_pools(conn, since)
+    if pools:
+        size = next((r[8] for r in pools if r[8]), None)
+        big = f"rt ${size:,.0f}" if size else "rt big"
+        print("\nPEGGED POOLS (who sets the price, and how thin each pool is; rt = round trip in bp)")
+        print(f"{'pair':<14}{'pool':<16}{'% best bid':>11}{'% best ask':>11}{'rt $100':>10}{big:>10}{'filled':>8}")
+        for pair, pool, _n, bw, aw, rt, rt_big, filled, _size in pools:
+            fill = f"{filled:.0f}%" if filled is not None else "-"
+            print(f"{pair:<14}{pool:<16}{bw:>10.1f}%{aw:>10.1f}%{fmt_bp(rt):>10}{fmt_bp(rt_big):>10}{fill:>8}")
 
 
 if __name__ == "__main__":

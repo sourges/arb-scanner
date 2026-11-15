@@ -29,6 +29,8 @@ SIG_DECIMALS = "decimals()"
 SIG_BLOCK_NUMBER = "getBlockNumber()"                       # Multicall3 helper
 SIG_BASEFEE = "getBasefee()"                                # Multicall3 helper
 SIG_L1_FEE_UPPER = "getL1FeeUpperBound(uint256)"            # Base GasPriceOracle
+SIG_GET_POOL_CLASSIC = "getPool(address,address,bool)"      # Aerodrome classic PoolFactory
+SIG_GET_AMOUNT_OUT = "getAmountOut(uint256,address)"        # Aerodrome classic Pool (fee taken out)
 
 
 # ---- encoders -----------------------------------------------------------------
@@ -54,6 +56,18 @@ def encode_quote(kind: str, token_in: str, token_out: str, amount_in: int, tier:
         raise ValueError(f"unknown dex kind {kind!r}")
     args = (_addr(token_in), _addr(token_out), int(amount_in), tier, 0)
     return selector(sig) + encode([tup], [args])
+
+
+def encode_get_pool_classic(token_a: str, token_b: str, stable: bool) -> bytes:
+    """Aerodrome classic PoolFactory.getPool(tokenA, tokenB, stable). Zero address = no pool."""
+    return selector(SIG_GET_POOL_CLASSIC) + encode(["address", "address", "bool"],
+                                                   [_addr(token_a), _addr(token_b), bool(stable)])
+
+
+def encode_get_amount_out(amount_in: int, token_in: str) -> bytes:
+    """Aerodrome classic Pool.getAmountOut(amountIn, tokenIn): a view on the pool itself.
+    Returns one uint256 (amount out, pool fee already removed); no gas estimate."""
+    return selector(SIG_GET_AMOUNT_OUT) + encode(["uint256", "address"], [int(amount_in), _addr(token_in)])
 
 
 def encode_no_args(signature: str) -> bytes:
