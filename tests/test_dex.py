@@ -86,5 +86,43 @@ class TestDex(unittest.TestCase):
         self.assertAlmostEqual(usd, 0.0053)
 
 
+class BadReplyChain(FakeChain):
+    """A provider that answers eth_call with something that isn't a multicall result."""
+
+    def __init__(self, reply):
+        super().__init__()
+        self.reply = reply
+
+    def eth_call(self, to, data, block="latest"):
+        return self.reply
+
+
+class TestBadReplies(unittest.TestCase):
+    CALLS = [("0x" + "11" * 20, b"\x00" * 4)]
+
+    def test_empty_or_cut_off_reply_is_rpc_error(self):
+        from rpc import RpcError
+        good = FakeChain().eth_call(make_config().MULTICALL3, dex.abi.encode_aggregate3(self.CALLS))
+        for reply in (b"", b"\x00" * 40, b"\xff" * 200, good[:-40]):
+            with self.assertRaises(RpcError, msg=f"{len(reply)} bytes"):
+                dex.multicall(BadReplyChain(reply), make_config().MULTICALL3, self.CALLS)
+
+    def test_wrong_number_of_answers_is_rpc_error(self):
+        from eth_abi import encode
+        from rpc import RpcError
+        two = encode(["(bool,bytes)[]"], [[(True, b""), (True, b"")]])
+        with self.assertRaisesRegex(RpcError, "answered 2 of 1"):
+            dex.multicall(BadReplyChain(two), make_config().MULTICALL3, self.CALLS)
+
+    def test_empty_block_number_answer_is_a_retryable_error(self):
+        from eth_abi import encode
+        cfg, _, pair_pools = setup()
+        n = 3 + 2 * sum(len(pools) for _, pools in pair_pools.values())
+        reply = encode(["(bool,bytes)[]"], [[(True, b"")] * n])     # "success" with nothing inside
+        with self.assertRaises(RuntimeError):
+            dex.quote_round(BadReplyChain(reply), cfg, pair_pools, PRICES, 100.0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

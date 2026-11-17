@@ -1,4 +1,4 @@
-"""SQLite storage. One file (arb_scanner.sqlite), four tables. Open it with
+"""SQLite storage. One file (arb_scanner.sqlite), six tables. Open it with
 report.py, DB Browser for SQLite, or pandas.read_sql.
 
 connect() also upgrades an older database in place: missing tables and any
@@ -90,6 +90,29 @@ CREATE TABLE IF NOT EXISTS episode_probes (
     sell_px       REAL
 );
 CREATE INDEX IF NOT EXISTS idx_probe_ts ON episode_probes (ts);
+-- Prices at every scan, one row per pair (see prices.py). path = pair name (ETH, BTC).
+-- raw_edge = DEX mid vs CEX mid in %; net_edge is always NULL (prices only, no costs).
+CREATE TABLE IF NOT EXISTS scan_prices (
+    ts            REAL,
+    strategy      TEXT,
+    venue         TEXT,
+    path          TEXT,
+    size_usd      REAL,
+    raw_edge      REAL,
+    net_edge      REAL,
+    block         INTEGER,
+    kraken_bid    REAL,
+    kraken_ask    REAL,
+    kraken_age    REAL,
+    coinbase_bid  REAL,
+    coinbase_ask  REAL,
+    coinbase_age  REAL,
+    dex_buy_px    REAL,
+    dex_buy_pool  TEXT,
+    dex_sell_px   REAL,
+    dex_sell_pool TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_prices_path_ts ON scan_prices (path, ts);
 """
 
 # Columns added after v1. Older databases get them via ALTER TABLE (old rows read NULL).
@@ -168,5 +191,19 @@ def insert_probes(conn, ts, block, route, results, strategy="dex_arb_probe", ven
         [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block, route,
           r.pair, r.buy_pool, r.sell_pool, r.usd_back, r.gas_usd, r.buy_px, r.sell_px)
          for r in results],
+    )
+    conn.commit()
+
+
+def insert_prices(conn, ts, block, rows, strategy="px", venue="base"):
+    """Price rows: one per pair per scan (see prices.py). net_edge is NULL on purpose."""
+    conn.executemany(
+        "INSERT INTO scan_prices (ts, strategy, venue, path, size_usd, raw_edge, net_edge, block,"
+        " kraken_bid, kraken_ask, kraken_age, coinbase_bid, coinbase_ask, coinbase_age,"
+        " dex_buy_px, dex_buy_pool, dex_sell_px, dex_sell_pool)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(ts, strategy, venue, r.pair, r.size_usd, r.raw_edge, None, block,
+          r.kraken_bid, r.kraken_ask, r.kraken_age, r.coinbase_bid, r.coinbase_ask, r.coinbase_age,
+          r.dex_buy_px, r.dex_buy_pool, r.dex_sell_px, r.dex_sell_pool) for r in rows],
     )
     conn.commit()

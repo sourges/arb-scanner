@@ -4,6 +4,7 @@ Using eth_abi directly (instead of web3.py contract objects) keeps the
 dependency list small and avoids web3 version differences.
 """
 from eth_abi import decode, encode
+from eth_abi.exceptions import DecodingError   # what decode() raises on a bad reply
 from eth_hash.auto import keccak
 
 

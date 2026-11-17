@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import abi
+from rpc import RpcError
 
 
 @dataclass
@@ -71,11 +72,21 @@ class DexQuote:
 
 
 def multicall(rpc, multicall_addr: str, calls):
-    """calls: list of (target, calldata). Returns list of (success, return_bytes)."""
+    """calls: list of (target, calldata). Returns list of (success, return_bytes).
+
+    A reply that is empty, cut off, or has the wrong number of answers raises RpcError:
+    the provider sent something bad, so the round is skipped and retried (see scanner.RETRYABLE)."""
     if not calls:
         return []
     data = rpc.eth_call(multicall_addr, abi.encode_aggregate3(calls))
-    return abi.decode_aggregate3(data)
+    try:
+        results = abi.decode_aggregate3(data)
+    except abi.DecodingError as e:
+        raise RpcError(f"eth_call: multicall reply can't be decoded "
+                       f"({len(data)} bytes, {type(e).__name__})") from e
+    if len(results) != len(calls):
+        raise RpcError(f"eth_call: multicall answered {len(results)} of {len(calls)} calls")
+    return results
 
 
 def verify_tokens(rpc, multicall_addr: str, tokens):
@@ -160,7 +171,7 @@ def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd, cross=None):
 
     results = multicall(rpc, cfg.MULTICALL3, calls)
     (ok_b, ret_b), (ok_f, ret_f), (ok_l1, ret_l1) = results[:3]
-    if not (ok_b and ok_f):
+    if not (ok_b and ok_f and len(ret_b) >= 32 and len(ret_f) >= 32):
         raise RuntimeError("multicall could not read block number / base fee")
     rd = RoundData(
         block=abi.decode_uint(ret_b),

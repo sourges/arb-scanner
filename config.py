@@ -14,7 +14,8 @@ load_dotenv()
 RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
 RPC_TIMEOUT_S = 10
 
-POLL_SECONDS = 2.0          # Base makes a block about every 2s
+POLL_SECONDS = 2.0          # one scan every 2s. Base makes a block about every 0.2s, so this
+                            # sees roughly every 10th block; faster polling uses more RPC credits
 BOOK_MAX_AGE_S = 6.0        # ignore a CEX order book older than this
 DB_PATH = "arb_scanner.sqlite"
 
@@ -60,6 +61,12 @@ PAIRS = [
         "coinbase": "BTC-USD",
     },
 ]
+
+# ---- price rows (prices.py) -----------------------------------------------------------
+# Every scan, one row per pair goes in scan_prices: Kraken and Coinbase best bid/ask, how
+# old each book was, and the best pool buy and sell price. No extra RPC calls. It adds
+# about 86,000 small rows a day (the same as tri_quotes). False turns it off.
+PRICE_LOG = True
 
 # ---- size probes (probe.py) ---------------------------------------------------------
 # When a dex>dex episode OPENS at or above PROBE_MIN_NET_PCT (net, after gas, at $100),

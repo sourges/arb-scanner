@@ -130,6 +130,68 @@ class TestScanner(unittest.TestCase):
             s.conn.execute("SELECT COUNT(*) FROM episodes WHERE route='dex>dex'").fetchone(), (1,))
 
 
+class TestPriceRows(unittest.TestCase):
+    def test_every_scan_writes_one_price_row_per_pair(self):
+        s, chain, clock, _ = make_scanner()
+        s.step()
+        chain.block, clock.t = 101, clock.t + 2
+        s.step()
+        rows = s.conn.execute(
+            "SELECT path, block, kraken_bid, kraken_ask, kraken_age, dex_buy_px, dex_buy_pool,"
+            " dex_sell_px, raw_edge, net_edge FROM scan_prices ORDER BY ts, path").fetchall()
+        self.assertEqual([(r[0], r[1]) for r in rows],
+                         [("BTC", 100), ("ETH", 100), ("BTC", 101), ("ETH", 101)])
+        eth = rows[3]
+        self.assertEqual(eth[2:4], (1999.5, 2000.5))               # fake book: mid 2000, spread 1
+        self.assertAlmostEqual(eth[4], 0.0)                        # fetched this scan
+        self.assertAlmostEqual(eth[5], 2000 / 0.9995, delta=0.01)  # pool price + 0.05% fee
+        self.assertEqual(eth[6], "uni-500")
+        self.assertAlmostEqual(eth[7], 2000 * 0.9995, delta=0.01)
+        self.assertAlmostEqual(eth[8], 0.0, delta=0.001)           # pools and Kraken agree
+        self.assertIsNone(eth[9])
+        s.shutdown()
+
+    def test_stale_book_shows_its_age_then_drops_out(self):
+        s, chain, clock, fetchers = make_scanner()
+        fetchers.fail.add("kraken")
+        with redirect_stdout(io.StringIO()):                       # hides the recorder's PEG line
+            chain.block, clock.t = 101, clock.t + 4                # cached Kraken book, 4s old
+            s.step()
+            chain.block, clock.t = 102, clock.t + 4                # 8s old: past BOOK_MAX_AGE_S
+            s.step()
+        ages = s.conn.execute("SELECT kraken_age, kraken_bid, coinbase_age FROM scan_prices"
+                              " WHERE path='ETH' ORDER BY ts").fetchall()
+        self.assertAlmostEqual(ages[0][0], 4.0)
+        self.assertEqual(ages[1][:2], (None, None))
+        self.assertAlmostEqual(ages[1][2], 0.0)
+        s.shutdown()
+
+    def test_price_log_off_writes_nothing(self):
+        s, *_ = make_scanner()
+        s.cfg.PRICE_LOG = False
+        s.step()
+        self.assertEqual(s.conn.execute("SELECT COUNT(*) FROM scan_prices").fetchone(), (0,))
+        s.shutdown()
+
+
+class TestBadRpcReply(unittest.TestCase):
+    def test_empty_reply_skips_the_round_and_the_scanner_carries_on(self):
+        s, chain, clock, _ = make_scanner()
+        real = chain.eth_call
+        replies = [b"", b"\x00" * 40]                              # two bad rounds, then normal
+
+        def flaky(to, data, block="latest"):
+            return replies.pop(0) if replies else real(to, data, block)
+        chain.eth_call = flaky
+        chain.block = 101
+        with redirect_stdout(io.StringIO()) as out:
+            fails = scanner_mod.run_forever(s, 2.0, sleep=lambda _s: None, clock=clock, max_rounds=3)
+        self.assertEqual(fails, 0)                                 # third round worked
+        self.assertEqual(out.getvalue().count("round failed (RpcError"), 2)
+        self.assertEqual(s.last_block, 101)
+        s.shutdown()
+
+
 class TestOutput(unittest.TestCase):
     def test_episode_line_shows_prices_and_samples(self):
         from tracker import Episode

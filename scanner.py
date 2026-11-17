@@ -16,6 +16,7 @@ import cex
 import config
 import db
 import dex
+import prices
 import probe
 import recorder
 import triangle
@@ -147,12 +148,20 @@ class Scanner:
         eth_usd = self.ref_prices.get("ETH")
 
         results = {}
+        price_rows = []
         for name, (pair, _pools) in self.pair_pools.items():
             quotes = dex.to_dex_quotes(cfg, rd, pair, eth_usd)
             books = {v: self.books.get(v, pair[v], now) for v in ("kraken", "coinbase")}
+            if getattr(cfg, "PRICE_LOG", False):
+                row = prices.build(name, cfg.TRADE_SIZE_USD, quotes, books, now)
+                if not row.empty:
+                    price_rows.append(row)
             for key, r in compute_routes(name, cfg.TRADE_SIZE_USD, quotes, books,
                                          cfg.CEX_FEES, cfg.REBALANCE_COST_USD).items():
                 results[(name, key)] = r
+
+        if price_rows:
+            db.insert_prices(self.conn, now, rd.block, price_rows)
 
         if self.cross:
             self.last_tri = self.compute_triangle(rd, eth_usd)

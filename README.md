@@ -1,6 +1,6 @@
 # base-arb-scanner
 
-Read-only arbitrage scanner for Base. Every block (~2s) it prices a $100 round
+Read-only arbitrage scanner for Base. Every 2 seconds it prices a $100 round
 trip across Base DEX pools, Kraken and Coinbase, subtracts every cost, and logs
 how often a route nets above zero and for how long. **It never trades and needs
 no wallet or exchange API keys.**
@@ -71,7 +71,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 136 tests ... OK)
+python -m unittest            (expect: Ran 156 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -90,6 +90,7 @@ python report.py --min-usd 0.10 --top 30
 - `report.py` skips episodes under `--min-usd` (default $0.05) as dust and lists the top episodes with their prices.
 - **minute_stats** table: per route per minute: samples, how many were > 0, best and average net %.
 - **tri_quotes** table: every scan's two triangle loops (see "Triangle" above). Not in `report.py` yet; open it with DB Browser for SQLite or pandas.
+- **scan_prices** table: the prices behind every scan (see "Price rows" below). Not in `report.py` yet.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
 
 ## Size probes (how much could a gap absorb?)
@@ -110,6 +111,24 @@ above zero, the median and best net %, and the top probed gaps side by side. The
 runs one RPC round trip after the scan, so its $100 number can differ slightly from the
 episode's; all sizes in one probe come from the same block. `PROBE_MAX_PER_HOUR` caps
 the extra calls; `PROBE_SIZES_USD = []` turns probing off.
+
+## Price rows (the prices behind every scan)
+
+The other tables store results. `scan_prices` stores the prices themselves, one row per
+pair per scan, from data the scan already has (no extra RPC calls):
+
+- `kraken_bid`, `kraken_ask`, `coinbase_bid`, `coinbase_ask`: best bid and ask. Empty when there was no fresh book.
+- `kraken_age`, `coinbase_age`: seconds between fetching that book and the scan. A gap seen against a book several seconds old may never have existed.
+- `dex_buy_px` / `dex_buy_pool`: the cheapest pool to buy on (USDC paid per ETH/BTC at $100, fee and slippage inside, no gas). `dex_sell_px` / `dex_sell_pool`: the best pool to sell on.
+- Shared-format columns first: `ts, strategy ('px'), venue ('base'), path (ETH or BTC), size_usd, raw_edge, net_edge`. **raw_edge** = DEX mid / CEX mid - 1 in % (Kraken's mid, or Coinbase's if Kraken has no fresh book); positive = pools priced above the exchange. **net_edge** is always empty: no costs are applied.
+- Use it to measure how many seconds the pools take to follow Kraken, to drop stale-book gaps, or to re-price routes with other fees.
+- About 86,000 small rows a day, the same as `tri_quotes`. `PRICE_LOG = False` in `config.py` turns it off. Rows start Nov 14, 2026.
+
+## If the scanner stops
+
+- A bad reply from the RPC provider (empty, cut off, not JSON) is treated like any RPC error: the round is skipped and retried after 2, 4, 8 ... 30 seconds.
+- A real bug still stops the scanner with a traceback, on purpose.
+- `run_scanner.bat` starts the scanner again 30 seconds after it stops for any reason. To stop it for good: Ctrl+C, then Y.
 
 ## Sharing the data (stat-arb and other projects)
 
