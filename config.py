@@ -13,6 +13,13 @@ load_dotenv()
 # Fallback is Base's public endpoint: fine for a quick test, heavily rate-limited.
 RPC_URL = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
 RPC_TIMEOUT_S = 10
+# Second provider (Ankr free plan, Nov 2026) goes in .env as RPC_URL_2. Scans alternate
+# between the two so neither runs out of its monthly quota (Alchemy free = 30M CU,
+# we use about 1M a day). No RPC_URL_2 = everything on RPC_URL, as before.
+RPC_URL_2 = os.environ.get("RPC_URL_2") or None
+RPC_WEIGHTS = [1, 1]        # scans per turn: [1, 1] alternates, [2, 1] = 2 on RPC_URL per 1 on RPC_URL_2
+RPC_FAIL_LIMIT = 3          # this many failed calls in a row benches a provider (HTTP 429 benches at once)
+RPC_BENCH_S = 60            # how long a benched provider is skipped before it's tried again
 
 POLL_SECONDS = 2.0          # one scan every 2s. Base makes a block about every 0.2s, so this
                             # sees roughly every 10th block; faster polling uses more RPC credits

@@ -23,7 +23,8 @@ import recorder
 import tri_probe
 import triangle
 from routes import compute_routes
-from rpc import RpcClient, RpcError
+import rpc as rpclib
+from rpc import RpcClient, RpcError, RpcPool
 from tracker import EpisodeTracker, MinuteStats
 
 
@@ -273,7 +274,9 @@ class Scanner:
                                   self.quote_usds())
         self.fetch_books()
         rd = rd_job.result()
-        if rd.block == self.last_block:
+        # Same block as last scan = nothing new. An OLDER block can happen when scans
+        # alternate between providers and one is a block behind: skip it too.
+        if self.last_block is not None and rd.block <= self.last_block:
             return None
         self.last_block = rd.block
         now = self.clock()
@@ -354,9 +357,9 @@ def episode_line(e):
             f"cex mid {fmt_px(e.best_mid)}")
 
 
-def status_line(block, results, tri=None, bus=None, extras=()):
+def status_line(block, results, tri=None, bus=None, extras=(), rpc=None):
     """extras: names of the extra pairs. They share one 'EXTRA best' entry so the line
-    stays short: the single best route across all of them."""
+    stays short: the single best route across all of them. rpc: RpcPool.status() text."""
     parts = [f"blk {block}"]
     by_pair = {}
     best_extra = None
@@ -375,7 +378,35 @@ def status_line(block, results, tri=None, bus=None, extras=()):
         parts.append(triangle.best_line(tri))
     if bus is not None:
         parts.append(cex_triangle.best_line(bus))
+    if rpc:
+        parts.append(rpc)
     return " | ".join(parts)
+
+
+def build_rpc(cfg, log, make_client=None):
+    """RpcPool over RPC_URL and, if set, RPC_URL_2. Each is checked once (eth_chainId,
+    timed). A second provider that fails the check is left out and logged; the scanner
+    then runs on RPC_URL alone, as before. RPC_URL itself is always kept: if it is
+    wrong, startup stops with its own message."""
+    make_client = make_client or (lambda url: RpcClient(url, cfg.RPC_TIMEOUT_S))
+    urls = [cfg.RPC_URL] + ([cfg.RPC_URL_2] if getattr(cfg, "RPC_URL_2", None) else [])
+    clients = [make_client(u) for u in urls]
+    keep = [clients[0]]
+    for k, (name, ms, problem) in enumerate(rpclib.check_providers(clients)):
+        if problem is None:
+            log(f"RPC {name}: OK, Base, {ms:.0f}ms")
+            if k:
+                keep.append(clients[k])
+        else:
+            log(f"RPC {name}: {problem}" + ("  -> left out, running on the main RPC only" if k else ""))
+    weights = list(getattr(cfg, "RPC_WEIGHTS", [1, 1]))
+    if len(keep) < len(clients):
+        weights = weights[:1]
+    pool = RpcPool(keep, weights, getattr(cfg, "RPC_FAIL_LIMIT", 3), getattr(cfg, "RPC_BENCH_S", 60.0), log)
+    if len(keep) > 1:
+        log("RPC split: " + " / ".join(f"{s.name} x{weights[i] if i < len(weights) else 1}"
+                                       for i, s in enumerate(pool.slots)) + " scans per turn")
+    return pool
 
 
 def print_table(results):
@@ -391,7 +422,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     log(f"RPC: {urlparse(config.RPC_URL).netloc}  size ${config.TRADE_SIZE_USD:.0f}")
-    scanner = Scanner(config, RpcClient(config.RPC_URL, config.RPC_TIMEOUT_S), db.connect(config.DB_PATH))
+    scanner = Scanner(config, build_rpc(config, log), db.connect(config.DB_PATH))
     scanner.startup()
 
     if args.once:
@@ -435,6 +466,9 @@ def run_forever(scanner, poll_seconds, sleep=time.sleep, clock=time.time, max_ro
     while max_rounds is None or rounds < max_rounds:
         rounds += 1
         started = clock()
+        rotate = getattr(getattr(scanner, "rpc", None), "rotate", None)
+        if rotate:
+            rotate()                 # this scan's provider (load split); no-op with one RPC
         try:
             out = scanner.step()
             fails = 0
@@ -442,7 +476,9 @@ def run_forever(scanner, poll_seconds, sleep=time.sleep, clock=time.time, max_ro
                 tri = getattr(scanner, "last_tri", None) if getattr(scanner, "cross", None) else None
                 bus = getattr(scanner, "bus", None)
                 bus = bus.last if bus is not None and bus.enabled else None
-                log(status_line(*out, tri=tri, bus=bus, extras=getattr(scanner, "extra_names", ())))
+                status = getattr(getattr(scanner, "rpc", None), "status", None)
+                log(status_line(*out, tri=tri, bus=bus, extras=getattr(scanner, "extra_names", ()),
+                                rpc=status() if callable(status) else None))
         except RETRYABLE as e:
             fails += 1
             wait = min(30, 2 ** fails)

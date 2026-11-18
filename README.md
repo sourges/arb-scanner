@@ -77,12 +77,31 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 206 tests ... OK)
+python -m unittest            (expect: Ran 292 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
 
 Startup checks the token addresses (symbol + decimals) on-chain and lists the pools it found; it refuses to run if a token doesn't match.
+
+### Two RPC providers (load split + failover, Nov 18 2026)
+
+At about 1M Alchemy CU a day, one free Alchemy plan (30M/month) runs out in a full month.
+Put a second Base URL in `.env` as `RPC_URL_2` (Ankr's free plan: 200M credits, about 1M
+requests a month; we send about 1.4M a month in total) and scans alternate between them:
+
+- **Split:** one provider per scan, in the rotation `RPC_WEIGHTS` (config.py). `[1, 1]` alternates;
+  `[2, 1]` puts two scans on Alchemy for every one on Ankr. All calls in one scan (quotes, probes,
+  recorder) go to the same provider.
+- **Failover:** a failed call is tried once on the other provider, so the round isn't lost. HTTP 429,
+  or `RPC_FAIL_LIMIT` (3) failures in a row, benches a provider for `RPC_BENCH_S` (60s); the log says
+  `RPC ankr benched ...` and later `RPC ankr is answering again`.
+- **Startup check:** each URL must answer `eth_chainId` with Base (8453); the time it took is logged.
+  A bad `RPC_URL_2` is left out with a log line and everything runs on `BASE_RPC_URL`, as before.
+- **Status line** ends with e.g. `rpc ankr (alchemy 50% / ankr 50%)`: who served this scan, and the
+  share of calls since start. Only the domain is ever printed, never the URL (the key is in it).
+- Providers can be a block apart. A scan that comes back with an older block than the last one is
+  skipped like a repeated block.
 
 ## Reading the results
 
