@@ -12,7 +12,8 @@ taker fee (BUS_TAKER_FEES, per symbol) on what it receives.
     net_edge = Q back after fees  / size - 1
 There is no gas and nothing moves between venues. Not modeled: Binance's lot-size rounding
 (a fraction of a cent at $100) and the few hundred ms between the three book fetches;
-book_age (the oldest of the three books, in seconds) shows how far apart they were.
+book_age (seconds between the first and last of the three book fetches) shows how far
+apart they were.
 
 Rate limits: Binance.US allows 1200 request weight a minute per IP, and one book
 (limit <= 100) costs 5. 7 books every BUS_SECONDS = 4 is about 525 a minute. The
@@ -78,7 +79,7 @@ class CexTriResult:
     back_net: float        # Q back after the three taker fees
     fee_usd: float         # fees paid, in Q
     legs: tuple            # the three book symbols, in order
-    book_age: float        # oldest of the three books, seconds
+    book_age: float        # seconds between the first and last of the three books
 
     @property
     def raw_edge(self) -> float:
@@ -127,7 +128,7 @@ def loop_reverse(q, size, btc_q, eth_btc, eth_q, fees):
     return back_raw, back_net * (1 - f3)
 
 
-def compute(size, triangles, cross_symbol, books, fees, now):
+def compute(size, triangles, cross_symbol, books, fees):
     """books: {symbol: Book}. triangles: [{"quote", "btc", "eth"}]. Missing book = loop skipped."""
     out = []
     cross = books.get(cross_symbol)
@@ -135,7 +136,8 @@ def compute(size, triangles, cross_symbol, books, fees, now):
         btc_q, eth_q = books.get(t["btc"]), books.get(t["eth"])
         if cross is None or btc_q is None or eth_q is None:
             continue
-        age = max(now - b.fetched_at for b in (btc_q, cross, eth_q))
+        fetched = [b.fetched_at for b in (btc_q, cross, eth_q)]
+        age = max(fetched) - min(fetched)
         q = t["quote"]
         trio = ((t["btc"], btc_q), (cross_symbol, cross), (t["eth"], eth_q))
         fwd = loop_forward(q, size, *trio, fees)
@@ -158,12 +160,12 @@ def best_line(results):
 
 def print_table(results):
     print(f"{'Binance.US triangle':<22}{'leg 1':<10}{'leg 2':<10}{'leg 3':<10}{'back $':>10}"
-          f"{'fees $':>8}{'raw %':>9}{'net %':>9}{'age s':>7}")
+          f"{'fees $':>8}{'raw %':>9}{'net %':>9}{'gap s':>7}")
     if not results:
         print("(no Binance.US triangle this round)")
     for r in sorted(results, key=lambda x: -x.net_edge):
         print(f"{r.path:<22}{r.legs[0]:<10}{r.legs[1]:<10}{r.legs[2]:<10}{r.back_net:>10.3f}"
-              f"{r.fee_usd:>8.4f}{r.raw_edge:>8.3f}%{r.net_edge:>8.3f}%{r.book_age:>7.1f}")
+              f"{r.fee_usd:>8.4f}{r.raw_edge:>8.3f}%{r.net_edge:>8.3f}%{r.book_age:>7.2f}")
 
 
 class CexTriCollector:
@@ -271,7 +273,7 @@ class CexTriCollector:
             self.last = []
             return []
         fresh = {s: b for s, b in books.items() if now - b.fetched_at <= self.max_age}
-        results = compute(self.size, self.triangles, self.cross, fresh, self.fees, now)
+        results = compute(self.size, self.triangles, self.cross, fresh, self.fees)
         if results:
             db.insert_cex_tri(self.conn, now, results, venue=VENUE)
             self.rows += len(results)

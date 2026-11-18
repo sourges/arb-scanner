@@ -77,7 +77,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 204 tests ... OK)
+python -m unittest            (expect: Ran 206 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -153,7 +153,8 @@ sharing the ETHBTC book. 6 loops, 7 public order books, no API key.
   fees (`BUS_TAKER_FEES`, per symbol, default 0.02%: check your account's fee page).
 - Rows go in **cex_tri_quotes**: `ts, strategy ('tri_arb'), venue ('binanceus'), path, size_usd,
   raw_edge, net_edge`, then `back_raw, back_net, fee_usd, leg1, leg2, leg3, book_age`
-  (age of the oldest of the three books, in seconds). 6 rows every 4s, about 130K a day.
+  (seconds between the first and last of the three book fetches; rows from before the
+  Nov 18 fix hold a negative number and the report ignores them). 6 rows every 4s, about 130K a day.
 - **Rate limits:** Binance.US allows 1200 request weight a minute per IP, 5 per book, so
   7 books every 4s is about 525. It skips a round when Binance reports `BUS_MAX_WEIGHT` (800)
   used, and pauses at least `BUS_BACKOFF_S` (60s) or Binance's Retry-After on a 429 (slow
@@ -164,7 +165,7 @@ sharing the ETHBTC book. 6 loops, 7 public order books, no API key.
   skipped. Neither ever stops the Base scanner.
 - The status line ends with `BUS best <loop> <net %>`; `python scanner.py --once` prints all 6.
 - Not modeled: Binance's lot-size rounding (fractions of a cent at $100), and the few hundred
-  ms between the three fetches (that's what `book_age` shows).
+  ms between the three fetches (that's what `book_age` measures).
 - `BUS_SECONDS = None` turns it off.
 
 ## Price rows (the prices behind every scan)

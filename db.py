@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS tri_probes (
 );
 CREATE INDEX IF NOT EXISTS idx_tri_probe_ts ON tri_probes (ts);
 -- Triangles on one exchange (see cex_triangle.py): one row per loop per round.
--- raw_edge = before taker fees, net_edge = after. book_age = oldest of the three books (s).
+-- raw_edge = before taker fees, net_edge = after. book_age = seconds between the first and
+-- last of the three book fetches (rows before Nov 18 14:40 hold a wrong, negative number).
 CREATE TABLE IF NOT EXISTS cex_tri_quotes (
     ts            REAL,
     strategy      TEXT,

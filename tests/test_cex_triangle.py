@@ -54,7 +54,7 @@ def by_path(results):
 
 class TestMath(unittest.TestCase):
     def test_a_no_spread(self):
-        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books_a(), FEES, now=0))
+        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books_a(), FEES))
         self.assertEqual(set(res), {"USD>BTC>ETH>USD", "USD>ETH>BTC>USD"})
         for r in res.values():
             self.assertAlmostEqual(r.raw_edge, 0.0, delta=D)
@@ -63,7 +63,7 @@ class TestMath(unittest.TestCase):
 
     def test_b_spreads(self):
         books = {"BTCUSD": book(59990, 60010), "ETHBTC": book(0.03331, 0.03335), "ETHUSD": book(1999, 2001)}
-        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES, now=0))
+        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES))
         fwd, rev = res["USD>BTC>ETH>USD"], res["USD>ETH>BTC>USD"]
         self.assertAlmostEqual(fwd.back_raw, 99.883403, delta=1e-5)
         self.assertAlmostEqual(fwd.raw_edge, -0.116597, delta=D)
@@ -75,7 +75,7 @@ class TestMath(unittest.TestCase):
 
     def test_c_mispriced_cross(self):
         books = {"BTCUSD": book(60000, 60000), "ETHBTC": book(0.0329, 0.0330), "ETHUSD": book(2000, 2000)}
-        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES, now=0))
+        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES))
         self.assertAlmostEqual(res["USD>BTC>ETH>USD"].raw_edge, 1.010101, delta=D)
         self.assertAlmostEqual(res["USD>BTC>ETH>USD"].net_edge, 0.949507, delta=D)
         self.assertAlmostEqual(res["USD>ETH>BTC>USD"].raw_edge, -1.3, delta=D)
@@ -83,34 +83,51 @@ class TestMath(unittest.TestCase):
     def test_d_walks_thin_book(self):
         books = books_a()
         books["ETHUSD"] = book(0, 2000, bids=[(2000, 0.02), (1990, 10.0)])
-        fwd = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES, now=0))["USD>BTC>ETH>USD"]
+        fwd = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES))["USD>BTC>ETH>USD"]
         self.assertAlmostEqual(fwd.back_raw, 99.70, delta=1e-9)
         self.assertAlmostEqual(fwd.raw_edge, -0.3, delta=D)
 
     def test_too_thin_drops_that_loop_only(self):
         books = books_a()
         books["ETHUSD"] = Book("binanceus", [(2000, 0.01)], [(2000, 1000.0)], fetched_at=0)
-        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES, now=0))
+        res = by_path(ct.compute(100, TRI_USD, "ETHBTC", books, FEES))
         self.assertEqual(set(res), {"USD>ETH>BTC>USD"})                 # forward can't sell 0.05 ETH
 
     def test_e_fee_per_symbol(self):
         fees = {"default": 0.0002, "ETHBTC": 0.001}
-        for r in ct.compute(100, TRI_USD, "ETHBTC", books_a(), fees, now=0):
+        for r in ct.compute(100, TRI_USD, "ETHBTC", books_a(), fees):
             self.assertAlmostEqual(r.net_edge, -0.139956, delta=D)
 
     def test_missing_book_skips_its_triangle(self):
         books = books_a()
         books.update({"BTCUSDT": book(60000, 60000), "ETHUSDT": book(2000, 2000)})
-        res = ct.compute(100, ALL3, "ETHBTC", books, FEES, now=0)     # no USDC books
+        res = ct.compute(100, ALL3, "ETHBTC", books, FEES)     # no USDC books
         self.assertEqual({r.path for r in res},
                          {"USD>BTC>ETH>USD", "USD>ETH>BTC>USD", "USDT>BTC>ETH>USDT", "USDT>ETH>BTC>USDT"})
 
-    def test_book_age_is_the_oldest(self):
-        for oldest in ("BTCUSD", "ETHBTC", "ETHUSD"):                 # whichever leg is oldest
+    def test_book_age_is_the_gap_between_fetches(self):
+        """Books fetched at 100.0, 100.0 and 98.5 -> 1.5s apart, whichever leg is the odd one.
+        It never goes negative, however the books are timed."""
+        for oldest in ("BTCUSD", "ETHBTC", "ETHUSD"):
             books = books_a(now=100.0)
             books[oldest].fetched_at = 98.5
-            for r in ct.compute(100, TRI_USD, "ETHBTC", books, FEES, now=101.0):
-                self.assertAlmostEqual(r.book_age, 2.5, msg=oldest)
+            for r in ct.compute(100, TRI_USD, "ETHBTC", books, FEES):
+                self.assertAlmostEqual(r.book_age, 1.5, msg=oldest)
+        books = books_a(now=100.0)
+        books["ETHUSD"].fetched_at = 100.3                              # fetched after the others
+        for r in ct.compute(100, TRI_USD, "ETHBTC", books, FEES):
+            self.assertAlmostEqual(r.book_age, 0.3)
+
+    def test_collector_rows_have_a_non_negative_gap(self):
+        """The bug seen live: books fetched AFTER the scan started gave age -0.2s."""
+        clock = Clock(1000.0)
+        src = BookSource(clock)
+        c, _ = collector(clock, src)
+        clock.t = 1000.2                                                # fetches happen 0.2s later
+        res = c.collect(1000.0)
+        self.assertTrue(res)
+        for r in res:
+            self.assertAlmostEqual(r.book_age, 0.0)
 
 
 class FakeResponse:
@@ -361,8 +378,8 @@ class TestInScanner(unittest.TestCase):
 
 
 class TestReport(unittest.TestCase):
-    """Rows: USD>BTC>ETH>USD nets -0.06, -0.02, +0.01 (raws 0.0, 0.04, 0.07; ages 1, 2, 3)
-    -> 3 rounds, 33.33% > 0, median net -0.020, best +0.010, median raw +0.040, age 2.0."""
+    """Rows: USD>BTC>ETH>USD nets -0.06, -0.02, +0.01 (raws 0.0, 0.04, 0.07; gaps 1, 2, 3)
+    -> 3 rounds, 33.33% > 0, median net -0.020, best +0.010, median raw +0.040, gap 2.00."""
 
     def test_cex_triangle_section(self):
         conn = db.connect(":memory:")
@@ -374,7 +391,17 @@ class TestReport(unittest.TestCase):
             report.print_report(conn, 0, 0.05, 15)
         line = next(l for l in out.getvalue().splitlines() if l.startswith("binanceus"))
         self.assertEqual(line.split(), ["binanceus", "USD>BTC>ETH>USD", "3", "33.33%", "-0.020%",
-                                        "+0.010%", "+0.040%", "2.0"])
+                                        "+0.010%", "+0.040%", "2.00"])
+
+    def test_old_negative_ages_are_ignored_in_the_gap(self):
+        """Two rows from before the fix (-0.2, -0.3) and two after (0.1, 0.3) -> gap median 0.20."""
+        conn = db.connect(":memory:")
+        for i, age in enumerate((-0.2, -0.3, 0.1, 0.3)):
+            conn.execute("INSERT INTO cex_tri_quotes (ts, venue, path, net_edge, raw_edge, book_age)"
+                         " VALUES (?,?,?,?,?,?)", (1000 + i, "binanceus", "USD>BTC>ETH>USD", -0.1, -0.04, age))
+        (row,) = report.cex_tri_summary(conn, 0)
+        self.assertEqual(row[2], 4)                                     # every row still counts
+        self.assertAlmostEqual(row[7], 0.2)
 
     def test_old_database(self):
         import sqlite3

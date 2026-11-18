@@ -205,7 +205,8 @@ def tri_summary(conn, since_ts):
 
 def cex_tri_summary(conn, since_ts):
     """Per one-exchange triangle loop: venue, rounds, rounds with net > 0, median and best net %,
-    median raw % (spreads only, before fees) and median book age."""
+    median raw % (spreads only, before fees) and the median gap between the three book fetches.
+    Rows with a negative book_age (logged before the Nov 18 fix) are left out of the gap."""
     if not has_table(conn, "cex_tri_quotes"):
         return []
     per_loop = {}
@@ -218,7 +219,7 @@ def cex_tri_summary(conn, since_ts):
         nets = [r[0] for r in rows]
         out.append((venue, path, len(rows), sum(1 for n in nets if n > 0), statistics.median(nets),
                     max(nets), statistics.median(r[1] for r in rows),
-                    statistics.median(r[2] for r in rows)))
+                    statistics.median([r[2] for r in rows if r[2] is not None and r[2] >= 0] or [0.0])))
     return out
 
 
@@ -309,10 +310,10 @@ def print_report(conn, since, min_usd, top):
         print("  none yet")
     else:
         print(f"{'venue':<11}{'loop':<20}{'rounds':>8}{'% >0':>8}{'median net':>12}{'best net':>11}"
-              f"{'median raw':>12}{'age s':>7}")
+              f"{'median raw':>12}{'gap s':>7}")
         for venue, path, n, pos, med, best, med_raw, age in cex_loops:
             print(f"{venue:<11}{path:<20}{n:>8}{100 * pos / n:>7.2f}%{fmt_pct(med):>12}{fmt_pct(best):>11}"
-                  f"{fmt_pct(med_raw):>12}{age:>7.1f}")
+                  f"{fmt_pct(med_raw):>12}{age:>7.2f}")
 
     print("\nPEGGED PAIRS (recorder, once a minute; mid in bp away from 1.0, gap before gas)")
     print(f"{'pair':<14}{'minutes':>9}{'avg mid':>9}{'min':>8}{'max':>8}{'std':>7}{'gap>0':>8}{'best gap':>10}")
