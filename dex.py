@@ -122,37 +122,46 @@ def discover_pools(rpc, multicall_addr: str, dexes, token_a: str, token_b: str):
     return pools
 
 
-def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd, cross=None):
-    """pair_pools: {pair name: (pair cfg, [Pool])}. ref_prices: {pair name: USD price}.
+def pair_quote(cfg, pair):
+    """The token a pair's pools price against: pair["quote"], default USDC."""
+    return pair.get("quote", cfg.USDC)
+
+
+def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd, cross=None, quote_usd=None):
+    """pair_pools: {pair name: (pair cfg, [Pool])}. ref_prices: {pair name: USD price of base}.
+    quote_usd: {pair name: USD value of one quote token} for pairs not quoted in USDC
+    (missing = 1.0, i.e. USDC).
 
     For each pool we quote both directions:
-      buy  = TRADE_SIZE USDC -> base
-      sell = x_base -> USDC, where x_base = TRADE_SIZE / reference price
+      buy  = TRADE_SIZE worth of the quote token -> base
+      sell = x_base -> quote token, where x_base = TRADE_SIZE / reference price
     routes.py rescales the sell quote to the exact amount a buy produced.
 
     cross (optional): (pair_a cfg, pair_b cfg, [Pool]) for pools between the two base
     tokens (WETH/cbBTC). Each is quoted a -> b and b -> a at about TRADE_SIZE worth,
     inside the SAME eth_call, so the triangle costs no extra RPC call.
     """
-    usdc = cfg.USDC
+    quote_usd = quote_usd or {}
     calls = [
         (cfg.MULTICALL3, abi.encode_no_args(abi.SIG_BLOCK_NUMBER)),
         (cfg.MULTICALL3, abi.encode_no_args(abi.SIG_BASEFEE)),
         (cfg.GAS_PRICE_ORACLE, abi.encode_l1_fee_upper(cfg.L1_TX_SIZE_BYTES)),
     ]
-    usdc_in = int(size_usd * 10 ** usdc["decimals"])
     layout = []   # parallel to calls[3:], two entries per pool
     raws = {}
     for name, (pair, pools) in pair_pools.items():
-        base = pair["base"]
+        base, quote = pair["base"], pair_quote(cfg, pair)
+        if not ref_prices.get(name) or not quote_usd.get(name, 1.0):
+            continue              # no reference price this round: skip the pair, not the round
+        quote_in = int(size_usd / quote_usd.get(name, 1.0) * 10 ** quote["decimals"])
         x_base_raw = int(size_usd / ref_prices[name] * 10 ** base["decimals"])
         raws[name] = []
         for p in pools:
             r = PoolQuoteRaw(pool=p, x_base_raw=x_base_raw)
             raws[name].append(r)
-            calls.append((p.quoter, abi.encode_quote(p.kind, usdc["address"], base["address"], usdc_in, p.tier)))
+            calls.append((p.quoter, abi.encode_quote(p.kind, quote["address"], base["address"], quote_in, p.tier)))
             layout.append((r, "buy"))
-            calls.append((p.quoter, abi.encode_quote(p.kind, base["address"], usdc["address"], x_base_raw, p.tier)))
+            calls.append((p.quoter, abi.encode_quote(p.kind, base["address"], quote["address"], x_base_raw, p.tier)))
             layout.append((r, "sell"))
 
     cross_raws = []
@@ -205,9 +214,10 @@ def leg_gas_usd(gas_units, basefee_wei, priority_wei, overhead, l1_fee_wei, fall
     return l2_usd + l1_usd
 
 
-def to_dex_quotes(cfg, rd: RoundData, pair, eth_usd):
-    """Convert one pair's raw quotes to DexQuote (human units, USD gas)."""
-    base_dec, usdc_dec = pair["base"]["decimals"], cfg.USDC["decimals"]
+def to_dex_quotes(cfg, rd: RoundData, pair, eth_usd, quote_usd=1.0):
+    """Convert one pair's raw quotes to DexQuote (human units, USD gas).
+    quote_usd: USD value of one quote token (1.0 for USDC); sell amounts come back in USD."""
+    base_dec, usdc_dec = pair["base"]["decimals"], pair_quote(cfg, pair)["decimals"]
 
     def gas(units):
         if units is None:
@@ -221,8 +231,65 @@ def to_dex_quotes(cfg, rd: RoundData, pair, eth_usd):
             label=r.pool.label,
             x_base=r.x_base_raw / 10 ** base_dec,
             buy_base_out=r.buy_out_raw / 10 ** base_dec if r.buy_out_raw else None,
-            sell_usd_out=r.sell_out_raw / 10 ** usdc_dec if r.sell_out_raw else None,
+            sell_usd_out=r.sell_out_raw / 10 ** usdc_dec * quote_usd if r.sell_out_raw else None,
             buy_gas_usd=gas(r.buy_gas),
             sell_gas_usd=gas(r.sell_gas),
         ))
     return out
+
+
+def read_tokens(rpc, multicall_addr: str, tokens):
+    """[(symbol, decimals) or None] per token, read from the chain (None = no reply)."""
+    calls = []
+    for t in tokens:
+        calls.append((t["address"], abi.encode_no_args(abi.SIG_SYMBOL)))
+        calls.append((t["address"], abi.encode_no_args(abi.SIG_DECIMALS)))
+    results = multicall(rpc, multicall_addr, calls)
+    out = []
+    for i in range(len(tokens)):
+        (ok_s, ret_s), (ok_d, ret_d) = results[2 * i], results[2 * i + 1]
+        if not (ok_s and ok_d and ret_s and ret_d):
+            out.append(None)
+            continue
+        try:
+            out.append((abi.decode_string(ret_s), abi.decode_uint(ret_d)))
+        except Exception:
+            out.append(None)
+    return out
+
+
+def median_price(prices):
+    """Median of the non-None values, or None."""
+    vals = sorted(p for p in prices if p)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
+def pool_buy_prices(rpc, cfg, pair, pools, quote_usd, size_usd):
+    """{pool label: USD paid per base token} for a size_usd buy on each pool (None = no fill).
+    One eth_call. Used at startup to get a first reference price and spot off-market pools."""
+    base, quote = pair["base"], pair_quote(cfg, pair)
+    quote_in = int(size_usd / quote_usd * 10 ** quote["decimals"])
+    calls = [(p.quoter, abi.encode_quote(p.kind, quote["address"], base["address"], quote_in, p.tier))
+             for p in pools]
+    out = {}
+    for p, (ok, ret) in zip(pools, multicall(rpc, cfg.MULTICALL3, calls)):
+        got = None
+        if ok and len(ret) >= 128:
+            amount, _gas = abi.decode_quote(ret)
+            if amount:
+                got = size_usd / (amount / 10 ** base["decimals"])
+        out[p.label] = got
+    return out
+
+
+def dex_mid(quotes, size_usd):
+    """Median mid price (USD per base) across pools from one round's DexQuotes:
+    mid of the buy price (size / base out) and sell price (USD out / x_base) per pool."""
+    mids = []
+    for q in quotes:
+        if q.buy_base_out and q.sell_usd_out and q.x_base:
+            mids.append((size_usd / q.buy_base_out + q.sell_usd_out / q.x_base) / 2)
+    return median_price(mids)

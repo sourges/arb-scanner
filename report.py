@@ -265,32 +265,32 @@ def main(argv=None):
 
 def print_report(conn, since, min_usd, top):
     print("ROUTES (from minute stats)")
-    print(f"{'pair route':<34}{'samples':>9}{'% >0':>8}{'best %':>9}{'avg %':>9}")
+    print(f"{'pair route':<38}{'samples':>9}{'% >0':>8}{'best %':>9}{'avg %':>9}")
     for pair, route, n, pos, best, avg in route_summary(conn, since):
-        print(f"{pair + ' ' + route:<34}{n:>9}{100 * pos / n:>7.2f}%{best:>8.3f}%{avg:>8.3f}%")
+        print(f"{pair + ' ' + route:<38}{n:>9}{100 * pos / n:>7.2f}%{best:>8.3f}%{avg:>8.3f}%")
 
     print(f"\nEPISODES >= ${min_usd:.2f}  ({dust_count(conn, since, min_usd)} smaller ones skipped as dust)")
-    print(f"{'pair route':<34}{'count':>7}{'med secs':>10}{'max secs':>10}{'sum best $':>12}")
+    print(f"{'pair route':<38}{'count':>7}{'med secs':>10}{'max secs':>10}{'sum best $':>12}")
     eps = episode_summary(conn, since, min_usd)
     if not eps:
         print("  none")
     for pair, route, count, med_secs, max_secs, total in eps:
-        print(f"{pair + ' ' + route:<34}{count:>7}{med_secs:>10.0f}{max_secs:>10.0f}{total:>12.3f}")
+        print(f"{pair + ' ' + route:<38}{count:>7}{med_secs:>10.0f}{max_secs:>10.0f}{total:>12.3f}")
 
     print(f"\nTOP {top} EPISODES (local time, prices at the best moment)")
-    print(f"{'start':<16}{'pair route':<32}{'samp':>5}{'secs':>6}{'net $':>8}{'net %':>8}"
-          f"  {'buy @ price':<28}{'sell @ price':<28}{'cex mid':>12}")
+    print(f"{'start':<16}{'pair route':<36}{'samp':>5}{'secs':>6}{'net $':>8}{'net %':>8}"
+          f"  {'buy @ price':<38}{'sell @ price':<38}{'cex mid':>12}")
     for (ts, pair, route, samples, secs, usd, pct, buy, buy_px, sell, sell_px,
          _start_mid, best_mid) in top_episodes(conn, since, min_usd, top):
         start = time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
-        print(f"{start:<16}{pair + ' ' + route:<32}{samples:>5}{secs:>6.0f}{usd:>8.3f}{pct:>7.3f}%"
-              f"  {buy + ' @' + fmt_px(buy_px):<28}{sell + ' @' + fmt_px(sell_px):<28}{fmt_px(best_mid):>12}")
+        print(f"{start:<16}{pair + ' ' + route:<36}{samples:>5}{secs:>6.0f}{usd:>8.3f}{pct:>7.3f}%"
+              f"  {buy + ' @' + fmt_px(buy_px):<37} {sell + ' @' + fmt_px(sell_px):<37} {fmt_px(best_mid):>11}")
 
     print("\n'sum best $' adds each episode's best moment once: an upper bound, not a P&L.")
     print("Prices show '?' for episodes logged before price tracking was added.")
 
     print("\nSIZE PROBES (dex>dex gaps re-quoted at bigger sizes when they open; net after gas)")
-    print_probe_table(conn, since, top, "episode_probes", "pair  buy>sell pool", 30)
+    print_probe_table(conn, since, top, "episode_probes", "pair  buy>sell pool", 40)
 
     print("\nTRIANGLE (every scan at $100, net after fees and gas)")
     loops = tri_summary(conn, since)

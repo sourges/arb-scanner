@@ -63,6 +63,39 @@ PAIRS = [
     },
 ]
 
+# ---- extra pairs (added Nov 18, 2026) ------------------------------------------------
+# Less-watched pairs, scanned every 2 seconds for dex>dex like ETH and BTC, in the SAME
+# eth_call (no extra RPC calls). Unlike PAIRS above they are optional: a token whose
+# on-chain symbol doesn't match, or a pair with no pools, is skipped with a log line and
+# the scanner runs on. decimals None = read from the chain at startup.
+#   quote      the token the pools price against (default USDC). Sizes stay in USD:
+#              "$100" of WETH is 100 / ETH price. Profit is converted back to USD.
+#   quote_ref  which reference price gives the quote token's USD value ("ETH", "BTC").
+#   base_ref   take the base token's USD price from that reference instead of a CEX book.
+#   kraken / coinbase  USD markets for the base token (optional). They give the reference
+#              price and the scan_prices columns. CEX routes only run for USDC-quoted
+#              pairs; the others are dex>dex only.
+# With no CEX book and no base_ref, the reference is the median pool price (DEX-derived).
+# AERO: the token migrated to a new contract Nov 2-6, 2026 (Aerodrome + Velodrome -> Aero).
+# This is the NEW contract; the legacy 0x9401...8631 is deliberately not used.
+SOL = {"address": "0x311935Cd80B76769bF2ecC9D8Ab7635b2139cf82", "symbol": "SOL", "decimals": None}
+AERO = {"address": "0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee", "symbol": "AERO", "decimals": None}
+VIRTUAL = {"address": "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b", "symbol": "VIRTUAL", "decimals": None}
+
+EXTRA_PAIRS = [
+    {"name": "ETH/BTC", "base": WETH, "quote": CBBTC, "base_ref": "ETH", "quote_ref": "BTC"},
+    {"name": "SOL", "base": SOL, "kraken": "SOLUSD", "coinbase": "SOL-USD"},
+    {"name": "AERO/ETH", "base": AERO, "quote": WETH, "quote_ref": "ETH",
+     "kraken": "AEROUSD", "coinbase": "AERO-USD"},
+    {"name": "VIRTUAL/ETH", "base": VIRTUAL, "quote": WETH, "quote_ref": "ETH",
+     "coinbase": "VIRTUAL-USD"},
+]
+
+# At startup, an extra pair's pool whose $100 price is more than this % away from the
+# pair's reference price is dropped as off-market (dead, abandoned or legacy pool), so it
+# can't show up as a fake gap. Logged. Not applied to ETH and BTC (unchanged).
+OFF_MARKET_PCT = 10.0
+
 # ---- price rows (prices.py) -----------------------------------------------------------
 # Every scan, one row per pair goes in scan_prices: Kraken and Coinbase best bid/ask, how
 # old each book was, and the best pool buy and sell price. No extra RPC calls. It adds
@@ -81,9 +114,11 @@ PROBE_MAX_PER_HOUR = 60
 
 # Triangle size probes (tri_probe.py): when a triangle loop's net edge at $100 reaches
 # this % (after being below it the scan before), its three pools are re-quoted at
-# PROBE_SIZES_USD in one extra eth_call. Rows go in tri_probes. Shares
-# PROBE_MAX_PER_HOUR with the dex>dex probes. None turns triangle probes off.
+# PROBE_SIZES_USD in one extra eth_call. Rows go in tri_probes. None turns triangle
+# probes off. Triangle probes have their OWN hourly cap (since Nov 18, 2026), so a busy
+# triangle hour can't use up the dex>dex probes' budget, and vice versa.
 TRI_PROBE_MIN_NET_PCT = 0.02
+TRI_PROBE_MAX_PER_HOUR = 60
 
 # ---- triangular arb (triangle.py) ------------------------------------------------
 # The two PAIRS names that form the triangle with USDC: USDC -> WETH -> cbBTC -> USDC

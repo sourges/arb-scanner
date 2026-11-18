@@ -70,12 +70,13 @@ class ProbeResult:
         return self.usd_back / self.base_amount if self.filled and self.base_amount else None
 
 
-def build_calls(cfg, pair, buy_pool, sell_pool, sizes, ref_price):
-    """Two quoter calls per size: buy on buy_pool, sell on sell_pool. Returns (calls, x_raws)."""
-    usdc, base = cfg.USDC, pair["base"]
+def build_calls(cfg, pair, buy_pool, sell_pool, sizes, ref_price, quote_usd=1.0):
+    """Two quoter calls per size: buy on buy_pool, sell on sell_pool. Returns (calls, x_raws).
+    Sizes are USD; the buy spends size / quote_usd of the pair's quote token (USDC = 1.0)."""
+    usdc, base = dex.pair_quote(cfg, pair), pair["base"]
     calls, x_raws = [], []
     for size in sizes:
-        usdc_in = int(size * 10 ** usdc["decimals"])
+        usdc_in = int(size / quote_usd * 10 ** usdc["decimals"])
         x_raw = int(size / ref_price * 10 ** base["decimals"])
         x_raws.append(x_raw)
         calls.append((buy_pool.quoter, abi.encode_quote(
@@ -94,11 +95,13 @@ def _quote(ok_ret):
     return abi.decode_quote(ret)
 
 
-def quote_sizes(rpc, cfg, pair, buy_pool, sell_pool, sizes, ref_price, basefee_wei, l1_fee_wei, eth_usd):
-    """Price the buy_pool -> sell_pool round trip at every size in one eth_call."""
-    calls, x_raws = build_calls(cfg, pair, buy_pool, sell_pool, sizes, ref_price)
+def quote_sizes(rpc, cfg, pair, buy_pool, sell_pool, sizes, ref_price, basefee_wei, l1_fee_wei, eth_usd,
+                quote_usd=1.0):
+    """Price the buy_pool -> sell_pool round trip at every size in one eth_call.
+    quote_usd: USD value of one quote token; usd_back is converted to USD."""
+    calls, x_raws = build_calls(cfg, pair, buy_pool, sell_pool, sizes, ref_price, quote_usd)
     results = dex.multicall(rpc, cfg.MULTICALL3, calls)
-    base_dec, usdc_dec = pair["base"]["decimals"], cfg.USDC["decimals"]
+    base_dec, usdc_dec = pair["base"]["decimals"], dex.pair_quote(cfg, pair)["decimals"]
 
     def gas(units):
         return dex.leg_gas_usd(units, basefee_wei, cfg.GAS_PRIORITY_WEI, cfg.SWAP_GAS_OVERHEAD,
@@ -111,7 +114,7 @@ def quote_sizes(rpc, cfg, pair, buy_pool, sell_pool, sizes, ref_price, basefee_w
         base_amount = buy_out / 10 ** base_dec if buy_out else None
         usd_back = None
         if base_amount and sell_out and x_raws[i]:
-            usd_back = sell_out / 10 ** usdc_dec * (buy_out / x_raws[i])
+            usd_back = sell_out / 10 ** usdc_dec * (buy_out / x_raws[i]) * quote_usd
         gas_usd = (gas(buy_gas) if buy_gas else 0.0) + (gas(sell_gas) if sell_gas else 0.0)
         out.append(ProbeResult(pair["name"], buy_pool.label, sell_pool.label, size,
                                base_amount, usd_back, gas_usd))
@@ -130,6 +133,24 @@ def probe_line(results):
     return f"PROBE {results[0].path}: " + " | ".join(parts)
 
 
+class HourlyCap:
+    """At most max_per_hour allowed in any rolling hour. allow(now) counts one if allowed."""
+
+    def __init__(self, max_per_hour):
+        self.max_per_hour = max_per_hour
+        self.recent = deque()      # timestamps allowed in the last hour
+        self.skipped = 0           # refused because the cap was reached
+
+    def allow(self, now):
+        while self.recent and now - self.recent[0] >= 3600:
+            self.recent.popleft()
+        if len(self.recent) >= self.max_per_hour:
+            self.skipped += 1
+            return False
+        self.recent.append(now)
+        return True
+
+
 class Prober:
     """Decides when to probe, runs it, stores it. Never raises into the scanner."""
 
@@ -142,9 +163,7 @@ class Prober:
         self.sizes = list(getattr(cfg, "PROBE_SIZES_USD", []))
         self.min_pct = getattr(cfg, "PROBE_MIN_NET_PCT", 0.05)
         self.routes = tuple(getattr(cfg, "PROBE_ROUTES", ("dex>dex",)))
-        self.max_per_hour = getattr(cfg, "PROBE_MAX_PER_HOUR", 60)
-        self.recent = deque()      # timestamps of probes in the last hour
-        self.skipped = 0           # probes not run because of the hourly cap
+        self.cap = HourlyCap(getattr(cfg, "PROBE_MAX_PER_HOUR", 60))   # dex>dex probes only
 
     def openings(self, results, already_open):
         """Route results that START an episode this round and are big enough to probe."""
@@ -153,19 +172,19 @@ class Prober:
         return [r for k, r in results.items()
                 if k[1] in self.routes and k not in already_open and r.net_pct >= self.min_pct]
 
-    def allow(self, now):
-        """Shared hourly cap: True (and counted) if one more probe may run now.
-        tri_probe.py uses the same cap, so both kinds together stay under it."""
-        while self.recent and now - self.recent[0] >= 3600:
-            self.recent.popleft()
-        if len(self.recent) >= self.max_per_hour:
-            self.skipped += 1
-            return False
-        self.recent.append(now)
-        return True
+    @property
+    def skipped(self):
+        return self.cap.skipped
 
-    def probe(self, now, block, opening, pair_pools, ref_prices, basefee_wei, l1_fee_wei):
-        """opening: RouteResults from openings(). Returns {path: [ProbeResult]}."""
+    def allow(self, now):
+        """This prober's own hourly cap (triangle probes have a separate one)."""
+        return self.cap.allow(now)
+
+    def probe(self, now, block, opening, pair_pools, ref_prices, basefee_wei, l1_fee_wei,
+              quote_usd=None):
+        """opening: RouteResults from openings(). quote_usd: {pair: USD per quote token}
+        for pairs not quoted in USDC. Returns {path: [ProbeResult]}."""
+        quote_usd = quote_usd or {}
         done = {}
         for r in opening:
             if not self.allow(now):
@@ -175,7 +194,8 @@ class Prober:
                 by_label = {p.label: p for p in pools}
                 buy_pool, sell_pool = by_label[r.buy_venue], by_label[r.sell_venue]
                 results = quote_sizes(self.rpc, self.cfg, pair, buy_pool, sell_pool, self.sizes,
-                                      ref_prices[r.pair], basefee_wei, l1_fee_wei, ref_prices["ETH"])
+                                      ref_prices[r.pair], basefee_wei, l1_fee_wei, ref_prices["ETH"],
+                                      quote_usd.get(r.pair, 1.0))
                 db.insert_probes(self.conn, now, block, r.key, results)
                 self.log(probe_line(results))
                 done[results[0].path] = results

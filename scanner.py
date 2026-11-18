@@ -31,6 +31,18 @@ def log(msg: str):
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
+def token_problem(tok, info):
+    """Why a token fails its on-chain check, or None. decimals None in config = take the chain's."""
+    if info is None:
+        return f"{tok['symbol']} at {tok['address']}: no response (wrong address?)"
+    sym, dec = info
+    if sym != tok["symbol"]:
+        return f"{tok['address']}: expected {tok['symbol']}, chain says {sym}"
+    if tok.get("decimals") is not None and dec != tok["decimals"]:
+        return f"{tok['address']}: expected {tok['decimals']} decimals, chain says {dec}"
+    return None
+
+
 class Scanner:
     def __init__(self, cfg, rpc, conn, fetchers=None, clock=time.time, bus_fetch=None):
         self.cfg = cfg
@@ -40,7 +52,10 @@ class Scanner:
         self.clock = clock
         self.books = cex.BookCache(cfg.BOOK_MAX_AGE_S)
         self.pair_pools = {}     # pair name -> (pair cfg, [Pool])
-        self.ref_prices = {}     # pair name -> USD
+        self.ref_prices = {}     # pair name -> USD price of the pair's base token
+        self.pairs = list(cfg.PAIRS)   # active pairs: PAIRS plus the EXTRA_PAIRS that passed startup
+        self.extra_names = []    # names of the active extra pairs, in config order
+        self.dex_ref = {}        # extra pair name -> last round's median pool price (USD)
         self.tracker = EpisodeTracker()
         self.minutes = MinuteStats()
         self.last_block = None
@@ -48,7 +63,10 @@ class Scanner:
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.recorder = recorder.Recorder(cfg, rpc, conn, log)
         self.prober = probe.Prober(cfg, rpc, conn, log, clock)
-        self.tri_prober = tri_probe.TriProber(cfg, rpc, conn, log, self.prober.allow)
+        # triangle probes get their own hourly cap, so they can't use up the dex>dex budget
+        self.tri_cap = probe.HourlyCap(getattr(cfg, "TRI_PROBE_MAX_PER_HOUR",
+                                               getattr(cfg, "PROBE_MAX_PER_HOUR", 60)))
+        self.tri_prober = tri_probe.TriProber(cfg, rpc, conn, log, self.tri_cap.allow)
         self.bus = cex_triangle.CexTriCollector(cfg, conn, log, fetch=bus_fetch, clock=clock,
                                                 pool=self.pool)
         self.cross = None        # (pair_a cfg, pair_b cfg, [Pool]) for the triangle, or None
@@ -84,9 +102,114 @@ class Scanner:
         missing = [p["name"] for p in cfg.PAIRS if p["name"] not in self.ref_prices]
         if missing:
             raise SystemExit(f"No CEX price for {missing}: Kraken and Coinbase both unreachable?")
-        log("reference prices: " + ", ".join(f"{k} ${v:,.2f}" for k, v in self.ref_prices.items()))
+        self.setup_extras()
+        log("reference prices: " + ", ".join(f"{k} ${v:,.4f}" if v < 10 else f"{k} ${v:,.2f}"
+                                             for k, v in self.ref_prices.items()))
         self.recorder.startup()
         self.bus.startup()
+
+    # ---- extra pairs (optional: anything wrong skips the pair, never the scanner) ----
+
+    def quote_usd_for(self, pair):
+        """USD value of one quote token: 1.0 for USDC, else the quote_ref reference price."""
+        ref = pair.get("quote_ref")
+        if ref is None:
+            same = dex.pair_quote(self.cfg, pair)["address"].lower() == self.cfg.USDC["address"].lower()
+            return 1.0 if same else None
+        return self.ref_prices.get(ref)
+
+    def quote_usds(self):
+        """{pair name: USD per quote token} for the active pairs not quoted in USDC."""
+        out = {}
+        for pair in self.pairs:
+            if pair.get("quote_ref"):
+                out[pair["name"]] = self.quote_usd_for(pair)
+        return out
+
+    def base_usd(self, pair, now=None):
+        """USD price of the base token from its own CEX book, else from base_ref, else None."""
+        now = self.clock() if now is None else now
+        for venue in ("kraken", "coinbase"):
+            symbol = pair.get(venue)
+            book = self.books.get(venue, symbol, now) if symbol else None
+            if book and book.mid:
+                return book.mid
+        if pair.get("base_ref"):
+            return self.ref_prices.get(pair["base_ref"])
+        return None
+
+    def setup_extras(self):
+        cfg = self.cfg
+        extras = list(getattr(cfg, "EXTRA_PAIRS", []) or [])
+        if not extras:
+            return
+        quotes = [dex.pair_quote(cfg, p) for p in extras]
+        infos = dex.read_tokens(self.rpc, cfg.MULTICALL3, [p["base"] for p in extras] + quotes)
+        limit = getattr(cfg, "OFF_MARKET_PCT", 10.0)
+        for i, pair in enumerate(extras):
+            name = pair["name"]
+            problem = None
+            filled = {}
+            for role, tok, info in (("base", pair["base"], infos[i]),
+                                    ("quote", quotes[i], infos[len(extras) + i])):
+                problem = problem or token_problem(tok, info)
+                if info:
+                    filled[role] = dict(tok, decimals=info[1])
+            if problem:
+                log(f"extra pair {name} skipped: {problem}")
+                continue
+            pair = dict(pair, base=filled["base"], quote=filled["quote"])
+            label = f"{pair['base']['symbol']}/{pair['quote']['symbol']}"
+
+            pools = dex.discover_pools(self.rpc, cfg.MULTICALL3, cfg.DEXES,
+                                       pair["base"]["address"], pair["quote"]["address"])
+            if not pools:
+                log(f"extra pair {name} skipped: no {label} pools on {', '.join(d['name'] for d in cfg.DEXES)}")
+                continue
+
+            for venue in ("kraken", "coinbase"):
+                symbol = pair.get(venue)
+                if not symbol:
+                    continue
+                fetch = self.fetchers.get(venue)
+                try:
+                    if fetch is None:
+                        raise LookupError("no fetcher")
+                    self.books.put(venue, symbol, fetch(symbol))
+                except Exception as e:
+                    log(f"  {name}: {venue} {symbol} not available ({type(e).__name__}); not used")
+                    pair[venue] = None
+
+            q_usd = self.quote_usd_for(pair)
+            if not q_usd:
+                log(f"extra pair {name} skipped: no USD price for its quote token {pair['quote']['symbol']}")
+                continue
+            px = dex.pool_buy_prices(self.rpc, cfg, pair, pools, q_usd, cfg.TRADE_SIZE_USD)
+            ref = self.base_usd(pair)
+            source = "CEX" if ref and not pair.get("base_ref") else ("base_ref" if ref else "median pool")
+            ref = ref or dex.median_price(px.values())
+            if not ref:
+                log(f"extra pair {name} skipped: no pool could fill a ${cfg.TRADE_SIZE_USD:,.0f} buy")
+                continue
+            keep, dropped = [], []
+            for p in pools:
+                got = px.get(p.label)
+                if got is None:
+                    dropped.append(f"{p.label} (can't fill)")
+                elif abs(got / ref - 1) * 100 > limit:
+                    dropped.append(f"{p.label} ({(got / ref - 1) * 100:+.1f}%)")
+                else:
+                    keep.append(p)
+            if not keep:
+                log(f"extra pair {name} skipped: every pool off-market: " + ", ".join(dropped))
+                continue
+            self.pair_pools[name] = (pair, keep)
+            self.pairs.append(pair)
+            self.extra_names.append(name)
+            self.ref_prices[name] = ref
+            log(f"{name} pools ({label}, ref from {source}): " + ", ".join(p.label for p in keep))
+            if dropped:
+                log(f"  {name} dropped as off-market (> {limit:g}% from ${ref:,.4f}): " + ", ".join(dropped))
 
     def setup_triangle(self):
         """Find the pools between the triangle's two tokens. No pools = triangle off, scanner runs on."""
@@ -119,10 +242,11 @@ class Scanner:
 
     def fetch_books(self):
         jobs = {}
-        for pair in self.cfg.PAIRS:
+        for pair in self.pairs:
             for venue, fetch in self.fetchers.items():
-                symbol = pair[venue]
-                jobs[(venue, symbol)] = self.pool.submit(fetch, symbol)
+                symbol = pair.get(venue)
+                if symbol and (venue, symbol) not in jobs:
+                    jobs[(venue, symbol)] = self.pool.submit(fetch, symbol)
         for (venue, symbol), fut in jobs.items():
             try:
                 self.books.put(venue, symbol, fut.result())
@@ -131,19 +255,21 @@ class Scanner:
 
     def update_ref_prices(self):
         now = self.clock()
-        for pair in self.cfg.PAIRS:
-            for venue in ("kraken", "coinbase"):
-                book = self.books.get(venue, pair[venue], now)
-                if book and book.mid:
-                    self.ref_prices[pair["name"]] = book.mid
-                    break
+        for pair in self.pairs:              # PAIRS first, so base_ref "ETH"/"BTC" is fresh
+            name = pair["name"]
+            usd = self.base_usd(pair, now)
+            if usd is None and name in self.extra_names:
+                usd = self.dex_ref.get(name)     # no CEX book: last round's median pool price
+            if usd:
+                self.ref_prices[name] = usd
 
     def step(self):
         """One scan. Returns (block, results) or None if the block hasn't changed."""
         cfg = self.cfg
         # Quote the chain and fetch the books at the same time.
         rd_job = self.pool.submit(dex.quote_round, self.rpc, cfg, self.pair_pools,
-                                  dict(self.ref_prices), cfg.TRADE_SIZE_USD, self.cross)
+                                  dict(self.ref_prices), cfg.TRADE_SIZE_USD, self.cross,
+                                  self.quote_usds())
         self.fetch_books()
         rd = rd_job.result()
         if rd.block == self.last_block:
@@ -152,17 +278,26 @@ class Scanner:
         now = self.clock()
         self.update_ref_prices()
         eth_usd = self.ref_prices.get("ETH")
+        quote_usd = self.quote_usds()
 
         results = {}
         price_rows = []
         for name, (pair, _pools) in self.pair_pools.items():
-            quotes = dex.to_dex_quotes(cfg, rd, pair, eth_usd)
-            books = {v: self.books.get(v, pair[v], now) for v in ("kraken", "coinbase")}
+            quotes = dex.to_dex_quotes(cfg, rd, pair, eth_usd, quote_usd.get(name) or 1.0)
+            if name in self.extra_names:
+                mid = dex.dex_mid(quotes, cfg.TRADE_SIZE_USD)
+                if mid:
+                    self.dex_ref[name] = mid
+            books = {v: self.books.get(v, pair.get(v), now) if pair.get(v) else None
+                     for v in ("kraken", "coinbase")}
             if getattr(cfg, "PRICE_LOG", False):
                 row = prices.build(name, cfg.TRADE_SIZE_USD, quotes, books, now)
                 if not row.empty:
                     price_rows.append(row)
-            for key, r in compute_routes(name, cfg.TRADE_SIZE_USD, quotes, books,
+            # CEX routes only where the pools price in USDC (the CEX books are USD markets)
+            usdc_quoted = name not in quote_usd
+            for key, r in compute_routes(name, cfg.TRADE_SIZE_USD, quotes,
+                                         books if usdc_quoted else {},
                                          cfg.CEX_FEES, cfg.REBALANCE_COST_USD).items():
                 results[(name, key)] = r
 
@@ -188,7 +323,7 @@ class Scanner:
             db.insert_minutes(self.conn, rows)
         if opening:
             self.prober.probe(now, rd.block, opening, self.pair_pools, dict(self.ref_prices),
-                              rd.basefee_wei, rd.l1_fee_wei)
+                              rd.basefee_wei, rd.l1_fee_wei, quote_usd)
         if tri_opening:
             self.tri_prober.probe(now, rd.block, tri_opening, self.cross, self.pair_pools,
                                   dict(self.ref_prices), rd.basefee_wei, rd.l1_fee_wei)
@@ -218,14 +353,23 @@ def episode_line(e):
             f"cex mid {fmt_px(e.best_mid)}")
 
 
-def status_line(block, results, tri=None, bus=None):
+def status_line(block, results, tri=None, bus=None, extras=()):
+    """extras: names of the extra pairs. They share one 'EXTRA best' entry so the line
+    stays short: the single best route across all of them."""
     parts = [f"blk {block}"]
     by_pair = {}
+    best_extra = None
     for (pair, _key), r in results.items():
+        if pair in extras:
+            if best_extra is None or r.net_pct > best_extra.net_pct:
+                best_extra = r
+            continue
         if pair not in by_pair or r.net_pct > by_pair[pair].net_pct:
             by_pair[pair] = r
     for pair, r in by_pair.items():
         parts.append(f"{pair} best {r.key} {r.net_pct:+.3f}%")
+    if best_extra is not None:
+        parts.append(f"EXTRA best {best_extra.pair} {best_extra.key} {best_extra.net_pct:+.3f}%")
     if tri is not None:
         parts.append(triangle.best_line(tri))
     if bus is not None:
@@ -250,8 +394,13 @@ def main(argv=None):
     scanner.startup()
 
     if args.once:
+        started = time.time()
         out = scanner.step()
+        took = time.time() - started
         if out:
+            n_pools = sum(len(pools) for _pair, pools in scanner.pair_pools.values())
+            print(f"one scan took {took:.2f}s for {len(scanner.pair_pools)} pairs / {n_pools} pools "
+                  f"(must stay well under POLL_SECONDS = {config.POLL_SECONDS:g}s)")
             print_table(out[1])
             print()
             if scanner.cross:
@@ -292,7 +441,7 @@ def run_forever(scanner, poll_seconds, sleep=time.sleep, clock=time.time, max_ro
                 tri = getattr(scanner, "last_tri", None) if getattr(scanner, "cross", None) else None
                 bus = getattr(scanner, "bus", None)
                 bus = bus.last if bus is not None and bus.enabled else None
-                log(status_line(*out, tri=tri, bus=bus))
+                log(status_line(*out, tri=tri, bus=bus, extras=getattr(scanner, "extra_names", ())))
         except RETRYABLE as e:
             fails += 1
             wait = min(30, 2 ** fails)

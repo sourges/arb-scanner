@@ -242,13 +242,35 @@ class TestInScanner(unittest.TestCase):
         self.assertEqual(chain.calls - before, one_scan + 1)
         s.shutdown()
 
-    def test_shares_the_hourly_cap(self):
+    def test_has_its_own_hourly_cap(self):
+        # The dex>dex cap at 0 must NOT stop triangle probes (separate budgets since Nov 18).
         chain = FakeChain()
         add_cross(chain, aero_premium=1.008)
         s, clock = make_scanner(chain, PROBE_MAX_PER_HOUR=0)
         step(s, chain, clock)
+        self.assertNotEqual(rows(s), [])
+        self.assertEqual(s.tri_cap.skipped, 0)
+        s.shutdown()
+
+    def test_own_cap_reached_skips_only_triangle_probes(self):
+        chain = FakeChain()
+        add_cross(chain, aero_premium=1.008)
+        s, clock = make_scanner(chain, TRI_PROBE_MAX_PER_HOUR=0)
+        step(s, chain, clock)
         self.assertEqual(rows(s), [])
-        self.assertEqual(s.prober.skipped, 1)                           # counted on the shared cap
+        self.assertEqual(s.tri_cap.skipped, 1)                          # counted on its own cap
+        self.assertEqual(s.prober.skipped, 0)                           # dex>dex budget untouched
+        s.shutdown()
+
+    def test_busy_triangle_cannot_use_up_dex_dex_probes(self):
+        # Spend the whole triangle budget, then check the dex>dex cap still has all of it.
+        chain = FakeChain()
+        s, clock = make_scanner(chain, TRI_PROBE_MAX_PER_HOUR=3, PROBE_MAX_PER_HOUR=3)
+        for _ in range(5):
+            s.tri_cap.allow(clock())
+        self.assertEqual(s.tri_cap.skipped, 2)
+        self.assertTrue(all(s.prober.allow(clock()) for _ in range(3)))
+        self.assertFalse(s.prober.allow(clock()))
         s.shutdown()
 
     def test_off_switch(self):

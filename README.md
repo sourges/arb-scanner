@@ -101,6 +101,29 @@ python report.py --min-usd 0.10 --top 30
 - **scan_prices** table: the prices behind every scan (see "Price rows" below). Not in `report.py` yet.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
 
+## Extra pairs (added Nov 18, 2026)
+
+Besides ETH/USDC and cbBTC/USDC, the 2-second scan also covers less-watched pairs from
+`EXTRA_PAIRS` in `config.py`: **ETH/BTC** (WETH/cbBTC pools), **SOL** (SOL/USDC),
+**AERO/ETH** (new AERO contract after the Nov 2026 Aero migration) and **VIRTUAL/ETH**.
+They ride in the same eth_call, so no extra RPC calls.
+
+- Pools priced in WETH or cbBTC are handled with a general quote token: the $100 trade is
+  $100 worth of the quote token, and every result is converted back to USD.
+- Reference price: the base token's own Kraken/Coinbase USD book, else `base_ref`
+  (ETH/BTC uses the ETH price), else the median pool price (DEX-derived, updated each scan).
+- CEX routes only run for USDC-quoted pairs (SOL). The WETH-priced pairs are `dex>dex` only;
+  their CEX books still feed `scan_prices`.
+- Optional: a token whose on-chain symbol doesn't match, a pair with no pools, or a CEX
+  market that doesn't exist is skipped with a log line; the scanner runs on. A pool whose
+  $100 price is more than `OFF_MARKET_PCT` (10%) from the reference is dropped at startup
+  as dead/legacy, so it can't show fake gaps. ETH and BTC are not screened (unchanged).
+- The status line shows ETH and BTC as before, plus one `EXTRA best <pair> <route> <net %>`.
+- Size probes work for every pair. dex>dex probes and triangle probes now have separate
+  hourly caps (`PROBE_MAX_PER_HOUR`, `TRI_PROBE_MAX_PER_HOUR`, 60 each).
+- `--once` prints how long one scan took. It must stay well under `POLL_SECONDS`.
+- Episode counts before and after Nov 18 aren't directly comparable: there are more pairs.
+
 ## Size probes (how much could a gap absorb?)
 
 Every route is scored at $100, and the gaps that show up are mostly on thin pools.

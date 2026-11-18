@@ -106,6 +106,18 @@ class TestReport(unittest.TestCase):
         self.assertIn("PEGGED PAIRS", out)
         self.assertIn("cbBTC/WBTC", out)
 
+    def test_long_venue_names_keep_their_columns(self):
+        # Nov 17 report showed "@1,825.76pcsv3-100": the buy price ran into the sell column.
+        db.insert_episodes(self.conn, [Episode(
+            "kraken_reduced_maker>dex", "ETH", 1, 5000.0, 1, 5082.0, 42, 0.9, 0.9,
+            "kraken_reduced_maker", "pcsv3-100",
+            best_mid=1829.38, best_buy_px=1825.76, best_sell_px=1831.24)])
+        buf = io.StringIO()
+        with mock.patch.object(report.config, "DB_PATH", self.path), redirect_stdout(buf):
+            report.main(["--top", "10"])
+        line = next(l for l in buf.getvalue().splitlines() if "@1,825.76" in l)
+        self.assertRegex(line, r"kraken_reduced_maker @1,825\.76 +pcsv3-100 @1,831\.24 +1,829\.38")
+
     def test_main_closes_the_database(self):
         # Windows refuses to delete an open file, so a leaked connection breaks cleanup there.
         opened = []
