@@ -8,6 +8,8 @@ Run:  python report.py                      whole history
 The last section summarizes the pegged-pair recorder (one quote per minute per
 pool): where each pair's mid sits versus 1.0, how much it wanders, and how often
 the best bid on one pool beat the best ask on another (a gross gap, before gas).
+TRIANGLE summarizes both triangle loops (every scan at $100), and TRIANGLE SIZE
+PROBES shows how the loops that opened held up at bigger sizes.
 PEGGED POOLS then lists every pool: how often it set the best price, and its
 round trip at $100 and at the bigger depth size (a thin pool's blows up).
 
@@ -150,13 +152,14 @@ def has_table(conn, name):
                         (name,)).fetchone() is not None
 
 
-def probe_summary(conn, since_ts):
-    """Per probe size: probes, how many filled, how many netted > 0, median and best net %."""
-    if not has_table(conn, "episode_probes"):
+def probe_summary(conn, since_ts, table="episode_probes"):
+    """Per probe size: probes, how many filled, how many netted > 0, median and best net %.
+    table: episode_probes (dex>dex) or tri_probes (triangle)."""
+    if not has_table(conn, table):
         return []
     per_size = {}
     for size, net in conn.execute(
-            "SELECT size_usd, net_edge FROM episode_probes WHERE ts >= ?", (since_ts,)):
+            f"SELECT size_usd, net_edge FROM {table} WHERE ts >= ?", (since_ts,)):
         per_size.setdefault(size, []).append(net)
     out = []
     for size in sorted(per_size):
@@ -168,14 +171,14 @@ def probe_summary(conn, since_ts):
     return out
 
 
-def top_probes(conn, since_ts, limit):
+def top_probes(conn, since_ts, limit, table="episode_probes"):
     """Best probed gaps: [(ts, path, {size: net % or None})], ordered by the
     smallest size's net %, best first."""
-    if not has_table(conn, "episode_probes"):
+    if not has_table(conn, table):
         return []
     probes = {}
     for ts, path, size, net in conn.execute(
-            "SELECT ts, path, size_usd, net_edge FROM episode_probes WHERE ts >= ?", (since_ts,)):
+            f"SELECT ts, path, size_usd, net_edge FROM {table} WHERE ts >= ?", (since_ts,)):
         probes.setdefault((ts, path), {})[size] = net
 
     def first_net(item):
@@ -185,6 +188,35 @@ def top_probes(conn, since_ts, limit):
 
     ranked = sorted(probes.items(), key=first_net, reverse=True)[:limit]
     return [(ts, path, sizes) for (ts, path), sizes in ranked]
+
+
+def tri_summary(conn, since_ts):
+    """Per triangle loop: scans, scans with net > 0, median and best net %."""
+    if not has_table(conn, "tri_quotes"):
+        return []
+    per_loop = {}
+    for path, net in conn.execute(
+            "SELECT path, net_edge FROM tri_quotes WHERE ts >= ?", (since_ts,)):
+        per_loop.setdefault(path, []).append(net)
+    return [(path, len(nets), sum(1 for n in nets if n > 0), statistics.median(nets), max(nets))
+            for path, nets in sorted(per_loop.items())]
+
+
+def print_probe_table(conn, since, top, table, path_label, path_width):
+    """The size table plus the top probed gaps, for either probe table."""
+    sizes = probe_summary(conn, since, table)
+    if not sizes:
+        print("  none yet")
+        return
+    print(f"{'size':>8}{'probes':>8}{'filled':>8}{'net>0':>7}{'median net':>13}{'best net':>12}")
+    for size, n, filled, pos, med, best in sizes:
+        print(f"{'$' + format(size, ',.0f'):>8}{n:>8}{filled:>8}{pos:>7}{fmt_pct(med):>13}{fmt_pct(best):>12}")
+    all_sizes = [row[0] for row in sizes]
+    print(f"\nTOP {top} PROBED GAPS (local time)")
+    print(f"{'start':<16}{path_label:<{path_width}}" + "".join(f"{'$' + format(z, ',.0f'):>12}" for z in all_sizes))
+    for ts, path, by_size in top_probes(conn, since, top, table):
+        start = time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
+        print(f"{start:<16}{path:<{path_width}}" + "".join(f"{fmt_pct(by_size[z]) if z in by_size else '-':>12}" for z in all_sizes))
 
 
 def fmt_pct(v):
@@ -237,19 +269,19 @@ def print_report(conn, since, min_usd, top):
     print("Prices show '?' for episodes logged before price tracking was added.")
 
     print("\nSIZE PROBES (dex>dex gaps re-quoted at bigger sizes when they open; net after gas)")
-    sizes = probe_summary(conn, since)
-    if not sizes:
+    print_probe_table(conn, since, top, "episode_probes", "pair  buy>sell pool", 30)
+
+    print("\nTRIANGLE (every scan at $100, net after fees and gas)")
+    loops = tri_summary(conn, since)
+    if not loops:
         print("  none yet")
     else:
-        print(f"{'size':>8}{'probes':>8}{'filled':>8}{'net>0':>7}{'median net':>13}{'best net':>12}")
-        for size, n, filled, pos, med, best in sizes:
-            print(f"{'$' + format(size, ',.0f'):>8}{n:>8}{filled:>8}{pos:>7}{fmt_pct(med):>13}{fmt_pct(best):>12}")
-        all_sizes = [row[0] for row in sizes]
-        print(f"\nTOP {top} PROBED GAPS (local time)")
-        print(f"{'start':<16}{'pair  buy>sell pool':<30}" + "".join(f"{'$' + format(z, ',.0f'):>12}" for z in all_sizes))
-        for ts, path, by_size in top_probes(conn, since, top):
-            start = time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
-            print(f"{start:<16}{path:<30}" + "".join(f"{fmt_pct(by_size[z]) if z in by_size else '-':>12}" for z in all_sizes))
+        print(f"{'loop':<26}{'scans':>9}{'% >0':>8}{'median net':>12}{'best net':>11}")
+        for path, n, pos, med, best in loops:
+            print(f"{path:<26}{n:>9}{100 * pos / n:>7.2f}%{fmt_pct(med):>12}{fmt_pct(best):>11}")
+
+    print("\nTRIANGLE SIZE PROBES (loops re-quoted at bigger sizes when they open; net after gas)")
+    print_probe_table(conn, since, top, "tri_probes", "loop  leg1/leg2/leg3 pools", 52)
 
     print("\nPEGGED PAIRS (recorder, once a minute; mid in bp away from 1.0, gap before gas)")
     print(f"{'pair':<14}{'minutes':>9}{'avg mid':>9}{'min':>8}{'max':>8}{'std':>7}{'gap>0':>8}{'best gap':>10}")

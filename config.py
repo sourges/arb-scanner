@@ -79,6 +79,12 @@ PROBE_MIN_NET_PCT = 0.05
 PROBE_ROUTES = ("dex>dex",)
 PROBE_MAX_PER_HOUR = 60
 
+# Triangle size probes (tri_probe.py): when a triangle loop's net edge at $100 reaches
+# this % (after being below it the scan before), its three pools are re-quoted at
+# PROBE_SIZES_USD in one extra eth_call. Rows go in tri_probes. Shares
+# PROBE_MAX_PER_HOUR with the dex>dex probes. None turns triangle probes off.
+TRI_PROBE_MIN_NET_PCT = 0.02
+
 # ---- triangular arb (triangle.py) ------------------------------------------------
 # The two PAIRS names that form the triangle with USDC: USDC -> WETH -> cbBTC -> USDC
 # and the reverse. Their cross pools (WETH/cbBTC) are found at startup and quoted in

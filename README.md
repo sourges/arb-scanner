@@ -77,7 +77,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 160 tests ... OK)
+python -m unittest            (expect: Ran 177 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -95,7 +95,8 @@ python report.py --min-usd 0.10 --top 30
 - **episodes** table: each run of consecutive profitable scans for a route: samples, seconds, best net, and the prices at the best moment (buy price, sell price, CEX mid) so you can see which side moved. Lasting episodes are what a slower bot could catch. Base makes a block about every 0.2s and the scanner samples about every 2s, so read `samples`/`seconds`, not the block columns.
 - `report.py` skips episodes under `--min-usd` (default $0.05) as dust and lists the top episodes with their prices.
 - **minute_stats** table: per route per minute: samples, how many were > 0, best and average net %.
-- **tri_quotes** table: every scan's two triangle loops (see "Triangle" above). Not in `report.py` yet; open it with DB Browser for SQLite or pandas.
+- **tri_quotes** table: every scan's two triangle loops (see "Triangle" above). `report.py`'s **TRIANGLE** section shows, per loop, scans, % above zero, and median and best net.
+- **tri_probes** table: triangle size probes (see "Triangle size probes" below), in `report.py`'s **TRIANGLE SIZE PROBES** section.
 - **scan_prices** table: the prices behind every scan (see "Price rows" below). Not in `report.py` yet.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
 
@@ -117,6 +118,27 @@ above zero, the median and best net %, and the top probed gaps side by side. The
 runs one RPC round trip after the scan, so its $100 number can differ slightly from the
 episode's; all sizes in one probe come from the same block. `PROBE_MAX_PER_HOUR` caps
 the extra calls; `PROBE_SIZES_USD = []` turns probing off.
+
+## Triangle size probes (Nov 18)
+
+The same question for the triangle. When a loop's $100 net edge reaches
+`TRI_PROBE_MIN_NET_PCT` (default +0.02%) after being below it on the scan before,
+its three pools are re-quoted at `PROBE_SIZES_USD` in one extra eth_call. Each leg is
+quoted at about that size (so slippage is in), then chained like the main scan.
+One row per size goes in the **tri_probes** table: the shared columns
+(`ts, strategy='tri_arb_probe', venue='base', path, size_usd, raw_edge, net_edge`), then
+`block, loop, leg1, leg2, leg3, usd_back, gas_usd, trigger_net` (the $100 net % that
+opened it). `path` is the loop plus its pools. NULL edges = a leg couldn't fill. Log line:
+
+```
+PROBE TRI USDC>WETH>cbBTC>USDC pcsv3-100/aero3-ts1/pcsv3-100: $100 +0.031% | $500 -0.012% | ...
+```
+
+It probes the pools the loop just used ("could this gap absorb more?"), not the best
+loop at each size. It shares `PROBE_MAX_PER_HOUR` with the dex>dex probes.
+`TRI_PROBE_MIN_NET_PCT = None` turns it off. Last week's data suggests roughly 100
+openings a day. This is the data for the Dec 15 decision: keep the triangle only if
+some loop clears costs at $500 or more.
 
 ## Price rows (the prices behind every scan)
 

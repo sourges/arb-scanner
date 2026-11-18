@@ -19,6 +19,7 @@ import dex
 import prices
 import probe
 import recorder
+import tri_probe
 import triangle
 from routes import compute_routes
 from rpc import RpcClient, RpcError
@@ -46,6 +47,7 @@ class Scanner:
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.recorder = recorder.Recorder(cfg, rpc, conn, log)
         self.prober = probe.Prober(cfg, rpc, conn, log, clock)
+        self.tri_prober = tri_probe.TriProber(cfg, rpc, conn, log, self.prober.allow)
         self.cross = None        # (pair_a cfg, pair_b cfg, [Pool]) for the triangle, or None
         self.last_tri = []       # latest triangle results
 
@@ -163,10 +165,12 @@ class Scanner:
         if price_rows:
             db.insert_prices(self.conn, now, rd.block, price_rows)
 
+        tri_opening = []
         if self.cross:
             self.last_tri = self.compute_triangle(rd, eth_usd)
             if self.last_tri:
                 db.insert_tri(self.conn, now, rd.block, self.last_tri)
+            tri_opening = self.tri_prober.openings(self.last_tri)
 
         # episodes opening this round, found before the tracker marks them open
         opening = self.prober.openings(results, self.tracker.open)
@@ -181,6 +185,9 @@ class Scanner:
         if opening:
             self.prober.probe(now, rd.block, opening, self.pair_pools, dict(self.ref_prices),
                               rd.basefee_wei, rd.l1_fee_wei)
+        if tri_opening:
+            self.tri_prober.probe(now, rd.block, tri_opening, self.cross, self.pair_pools,
+                                  dict(self.ref_prices), rd.basefee_wei, rd.l1_fee_wei)
         if self.recorder.due(now):
             quotes = self.recorder.record(now, dict(self.ref_prices))
             if quotes:

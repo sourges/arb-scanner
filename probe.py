@@ -153,7 +153,9 @@ class Prober:
         return [r for k, r in results.items()
                 if k[1] in self.routes and k not in already_open and r.net_pct >= self.min_pct]
 
-    def _allowed(self, now):
+    def allow(self, now):
+        """Shared hourly cap: True (and counted) if one more probe may run now.
+        tri_probe.py uses the same cap, so both kinds together stay under it."""
         while self.recent and now - self.recent[0] >= 3600:
             self.recent.popleft()
         if len(self.recent) >= self.max_per_hour:
@@ -166,7 +168,7 @@ class Prober:
         """opening: RouteResults from openings(). Returns {path: [ProbeResult]}."""
         done = {}
         for r in opening:
-            if not self._allowed(now):
+            if not self.allow(now):
                 continue
             try:
                 pair, pools = pair_pools[r.pair]

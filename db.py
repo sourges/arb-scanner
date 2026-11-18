@@ -90,6 +90,26 @@ CREATE TABLE IF NOT EXISTS episode_probes (
     sell_px       REAL
 );
 CREATE INDEX IF NOT EXISTS idx_probe_ts ON episode_probes (ts);
+-- Triangle size probes (see tri_probe.py): one row per size when a loop opens.
+-- path = loop + its three pools. NULL edges = a leg couldn't fill that size.
+CREATE TABLE IF NOT EXISTS tri_probes (
+    ts            REAL,
+    strategy      TEXT,
+    venue         TEXT,
+    path          TEXT,
+    size_usd      REAL,
+    raw_edge      REAL,
+    net_edge      REAL,
+    block         INTEGER,
+    loop          TEXT,
+    leg1          TEXT,
+    leg2          TEXT,
+    leg3          TEXT,
+    usd_back      REAL,
+    gas_usd       REAL,
+    trigger_net   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tri_probe_ts ON tri_probes (ts);
 -- Prices at every scan, one row per pair (see prices.py). path = pair name (ETH, BTC).
 -- raw_edge = DEX mid vs CEX mid in %; net_edge is always NULL (prices only, no costs).
 CREATE TABLE IF NOT EXISTS scan_prices (
@@ -205,5 +225,17 @@ def insert_prices(conn, ts, block, rows, strategy="px", venue="base"):
         [(ts, strategy, venue, r.pair, r.size_usd, r.raw_edge, None, block,
           r.kraken_bid, r.kraken_ask, r.kraken_age, r.coinbase_bid, r.coinbase_ask, r.coinbase_age,
           r.dex_buy_px, r.dex_buy_pool, r.dex_sell_px, r.dex_sell_pool) for r in rows],
+    )
+    conn.commit()
+
+
+def insert_tri_probes(conn, ts, block, results, strategy="tri_arb_probe", venue="base"):
+    """Triangle size-probe rows: one per size (see tri_probe.py). NULL edges = can't fill."""
+    conn.executemany(
+        "INSERT INTO tri_probes (ts, strategy, venue, path, size_usd, raw_edge, net_edge, block,"
+        " loop, leg1, leg2, leg3, usd_back, gas_usd, trigger_net)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block, r.loop,
+          r.legs[0], r.legs[1], r.legs[2], r.usd_back, r.gas_usd, r.trigger_net) for r in results],
     )
     conn.commit()

@@ -36,7 +36,7 @@ SEL = {name: abi.selector(sig) for name, sig in {
     "l1": abi.SIG_L1_FEE_UPPER, "pool_classic": abi.SIG_GET_POOL_CLASSIC,
     "amount_out": abi.SIG_GET_AMOUNT_OUT}.items()}
 
-USD_PER_UNIT = {USDC: 1.0, USDT: 1.0, CBBTC: 60000.0, WBTC: 60000.0}   # for pegged depth models
+USD_PER_UNIT = {USDC: 1.0, USDT: 1.0, CBBTC: 60000.0, WBTC: 60000.0, WETH: 2000.0}   # for pegged depth models
 
 DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8, WBTC: 8, USDT: 6, CBETH: 18, WSTETH: 18}
 
