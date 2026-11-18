@@ -192,19 +192,34 @@ def round_trip_bp(bid, ask):
     return (ask / bid - 1) * 1e4 if bid and ask else None
 
 
+DEAD_RT_BP = 100_000   # a round trip this big means the pool is empty, not just thin
+
+
+def fmt_px(px):
+    """Price for the table: 6 decimals, or compact (2.761e+06) when absurdly large. '-' if none."""
+    if px is None:
+        return "-"
+    return f"{px:.6f}" if px < 1000 else f"{px:.3e}"
+
+
+def fmt_rt(bp):
+    """Round trip for the table: '-' if missing, 'dead' at DEAD_RT_BP or more."""
+    if bp is None:
+        return "-"
+    return "dead" if bp >= DEAD_RT_BP else f"{bp:,.1f}"
+
+
 def print_table(quotes, depth_usd=None):
     """Every pool's quote (used by scanner.py --once for a sanity check).
-    'rt' = round trip on that pool in bp; a thin pool's bigger-size round trip blows up."""
+    'rt' = round trip on that pool in bp; a thin pool's bigger-size round trip blows up.
+    Columns are separated by a space, so a missing bid ('-') can't run into a huge ask."""
     big = f"rt bp ${depth_usd:,.0f}" if depth_usd else "rt bp big"
-    print(f"{'pegged pair':<14}{'pool':<16}{'bid':>12}{'ask':>12}{'rt bp $100':>12}{big:>14}")
+    print(f"{'pegged pair':<14} {'pool':<16} {'bid':>12} {'ask':>12} {'rt bp $100':>11} {big:>13}")
     for q in quotes:
-        bid = f"{q.bid:.6f}" if q.bid is not None else "-"
-        ask = f"{q.ask:.6f}" if q.ask is not None else "-"
         rt = round_trip_bp(q.bid, q.ask)
         rt_big = round_trip_bp(q.depth_bid, q.depth_ask)
-        print(f"{q.pair:<14}{q.pool:<16}{bid:>12}{ask:>12}"
-              f"{f'{rt:.1f}' if rt is not None else '-':>12}"
-              f"{f'{rt_big:.1f}' if rt_big is not None else '-':>14}")
+        print(f"{q.pair:<14} {q.pool:<16} {fmt_px(q.bid):>12} {fmt_px(q.ask):>12}"
+              f" {fmt_rt(rt):>11} {fmt_rt(rt_big):>13}")
 
 
 class Recorder:

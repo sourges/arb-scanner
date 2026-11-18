@@ -158,6 +158,46 @@ class TestDepth(unittest.TestCase):
         self.assertEqual(line.split()[-2:], ["4.0", "22.0"])
 
 
+class TestTableFormat(unittest.TestCase):
+    """The Nov 18 'negative bid' was display only: pcsv3-500 had no bid ('-') and an ask of
+    2760563.184657, printed with no space between them, so it read as '-2760563.184657'."""
+
+    def row(self, q):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            recorder.print_table([q], 1000.0)
+        return buf.getvalue().splitlines()[1]
+
+    def test_missing_bid_and_huge_ask_stay_separate(self):
+        fields = self.row(recorder.PegQuote("wstETH/WETH", "pcsv3-500", None, 2760563.184657)).split()
+        self.assertEqual(fields, ["wstETH/WETH", "pcsv3-500", "-", "2.761e+06", "-", "-"])
+
+    def test_exact_layout(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            recorder.print_table([recorder.PegQuote("wstETH/WETH", "pcsv3-500", None, 2760563.184657)], 1000.0)
+        self.assertEqual(buf.getvalue().splitlines(), [
+            "pegged pair    pool                      bid          ask  rt bp $100  rt bp $1,000",
+            "wstETH/WETH    pcsv3-500                   -    2.761e+06           -             -"])
+
+    def test_dead_round_trips_say_dead(self):
+        fields = self.row(recorder.PegQuote("cbBTC/WBTC", "pcsv3-100", 0.025628, 316.113320,
+                                            0.0001, 3000.0)).split()
+        self.assertEqual(fields[2:], ["0.025628", "316.113320", "dead", "dead"])
+
+    def test_normal_row_unchanged(self):
+        fields = self.row(recorder.PegQuote("USDT/USDC", "aero1-ts1", 0.998898, 0.998916,
+                                            0.998890, 0.998920)).split()
+        self.assertEqual(fields[2:], ["0.998898", "0.998916", "0.2", "0.3"])
+
+    def test_helpers(self):
+        self.assertEqual(recorder.fmt_px(None), "-")
+        self.assertEqual(recorder.fmt_px(999.5), "999.500000")
+        self.assertEqual(recorder.fmt_px(1000.0), "1.000e+03")
+        self.assertEqual(recorder.fmt_rt(99_999.9), "99,999.9")
+        self.assertEqual(recorder.fmt_rt(100_000.0), "dead")
+
+
 class TestOldDatabase(unittest.TestCase):
     def test_upgrade_adds_depth_columns_and_keeps_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
