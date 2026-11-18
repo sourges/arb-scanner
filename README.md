@@ -77,7 +77,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 177 tests ... OK)
+python -m unittest            (expect: Ran 204 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -96,6 +96,7 @@ python report.py --min-usd 0.10 --top 30
 - `report.py` skips episodes under `--min-usd` (default $0.05) as dust and lists the top episodes with their prices.
 - **minute_stats** table: per route per minute: samples, how many were > 0, best and average net %.
 - **tri_quotes** table: every scan's two triangle loops (see "Triangle" above). `report.py`'s **TRIANGLE** section shows, per loop, scans, % above zero, and median and best net.
+- **cex_tri_quotes** table: the Binance.US triangle (see below), in `report.py`'s **CEX TRIANGLE** section.
 - **tri_probes** table: triangle size probes (see "Triangle size probes" below), in `report.py`'s **TRIANGLE SIZE PROBES** section.
 - **scan_prices** table: the prices behind every scan (see "Price rows" below). Not in `report.py` yet.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
@@ -139,6 +140,32 @@ loop at each size. It shares `PROBE_MAX_PER_HOUR` with the dex>dex probes.
 `TRI_PROBE_MIN_NET_PCT = None` turns it off. Last week's data suggests roughly 100
 openings a day. This is the data for the Dec 15 decision: keep the triangle only if
 some loop clears costs at $500 or more.
+
+## Binance.US triangle (Nov 18)
+
+The same three-way loop, but all on one exchange: no gas, no pools, no MEV. For each
+quote currency (USD, USDT, USDC): **Q → BTC → ETH → Q** and **Q → ETH → BTC → Q**, all
+sharing the ETHBTC book. 6 loops, 7 public order books, no API key.
+
+- Every `BUS_SECONDS` (default 4s) it fetches the 7 books (top 20 levels), walks them for a
+  real $100 fill (buy at the asks, sell at the bids) and pays the taker fee on each leg.
+- **raw_edge** = before fees (spreads and depth only), **net_edge** = after the three taker
+  fees (`BUS_TAKER_FEES`, per symbol, default 0.02%: check your account's fee page).
+- Rows go in **cex_tri_quotes**: `ts, strategy ('tri_arb'), venue ('binanceus'), path, size_usd,
+  raw_edge, net_edge`, then `back_raw, back_net, fee_usd, leg1, leg2, leg3, book_age`
+  (age of the oldest of the three books, in seconds). 6 rows every 4s, about 130K a day.
+- **Rate limits:** Binance.US allows 1200 request weight a minute per IP, 5 per book, so
+  7 books every 4s is about 525. It skips a round when Binance reports `BUS_MAX_WEIGHT` (800)
+  used, and pauses at least `BUS_BACKOFF_S` (60s) or Binance's Retry-After on a 429 (slow
+  down) or 418 (IP ban). Your own Binance.US trading from this PC counts against the same
+  limit, so don't set `BUS_SECONDS` below 3.
+- Startup fetches every book once: a symbol Binance.US doesn't list drops that quote's loops
+  with a log line; no ETHBTC book turns the whole thing off. A failed round is logged and
+  skipped. Neither ever stops the Base scanner.
+- The status line ends with `BUS best <loop> <net %>`; `python scanner.py --once` prints all 6.
+- Not modeled: Binance's lot-size rounding (fractions of a cent at $100), and the few hundred
+  ms between the three fetches (that's what `book_age` shows).
+- `BUS_SECONDS = None` turns it off.
 
 ## Price rows (the prices behind every scan)
 

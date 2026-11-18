@@ -110,6 +110,25 @@ CREATE TABLE IF NOT EXISTS tri_probes (
     trigger_net   REAL
 );
 CREATE INDEX IF NOT EXISTS idx_tri_probe_ts ON tri_probes (ts);
+-- Triangles on one exchange (see cex_triangle.py): one row per loop per round.
+-- raw_edge = before taker fees, net_edge = after. book_age = oldest of the three books (s).
+CREATE TABLE IF NOT EXISTS cex_tri_quotes (
+    ts            REAL,
+    strategy      TEXT,
+    venue         TEXT,
+    path          TEXT,
+    size_usd      REAL,
+    raw_edge      REAL,
+    net_edge      REAL,
+    back_raw      REAL,
+    back_net      REAL,
+    fee_usd       REAL,
+    leg1          TEXT,
+    leg2          TEXT,
+    leg3          TEXT,
+    book_age      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_cex_tri_path_ts ON cex_tri_quotes (path, ts);
 -- Prices at every scan, one row per pair (see prices.py). path = pair name (ETH, BTC).
 -- raw_edge = DEX mid vs CEX mid in %; net_edge is always NULL (prices only, no costs).
 CREATE TABLE IF NOT EXISTS scan_prices (
@@ -237,5 +256,17 @@ def insert_tri_probes(conn, ts, block, results, strategy="tri_arb_probe", venue=
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block, r.loop,
           r.legs[0], r.legs[1], r.legs[2], r.usd_back, r.gas_usd, r.trigger_net) for r in results],
+    )
+    conn.commit()
+
+
+def insert_cex_tri(conn, ts, results, strategy="tri_arb", venue="binanceus"):
+    """One-exchange triangle rows: one per loop per round (see cex_triangle.py)."""
+    conn.executemany(
+        "INSERT INTO cex_tri_quotes (ts, strategy, venue, path, size_usd, raw_edge, net_edge,"
+        " back_raw, back_net, fee_usd, leg1, leg2, leg3, book_age)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, r.back_raw, r.back_net,
+          r.fee_usd, r.legs[0], r.legs[1], r.legs[2], r.book_age) for r in results],
     )
     conn.commit()

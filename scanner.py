@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 import cex
+import cex_triangle
 import config
 import db
 import dex
@@ -31,7 +32,7 @@ def log(msg: str):
 
 
 class Scanner:
-    def __init__(self, cfg, rpc, conn, fetchers=None, clock=time.time):
+    def __init__(self, cfg, rpc, conn, fetchers=None, clock=time.time, bus_fetch=None):
         self.cfg = cfg
         self.rpc = rpc
         self.conn = conn
@@ -48,6 +49,8 @@ class Scanner:
         self.recorder = recorder.Recorder(cfg, rpc, conn, log)
         self.prober = probe.Prober(cfg, rpc, conn, log, clock)
         self.tri_prober = tri_probe.TriProber(cfg, rpc, conn, log, self.prober.allow)
+        self.bus = cex_triangle.CexTriCollector(cfg, conn, log, fetch=bus_fetch, clock=clock,
+                                                pool=self.pool)
         self.cross = None        # (pair_a cfg, pair_b cfg, [Pool]) for the triangle, or None
         self.last_tri = []       # latest triangle results
 
@@ -83,6 +86,7 @@ class Scanner:
             raise SystemExit(f"No CEX price for {missing}: Kraken and Coinbase both unreachable?")
         log("reference prices: " + ", ".join(f"{k} ${v:,.2f}" for k, v in self.ref_prices.items()))
         self.recorder.startup()
+        self.bus.startup()
 
     def setup_triangle(self):
         """Find the pools between the triangle's two tokens. No pools = triangle off, scanner runs on."""
@@ -188,6 +192,8 @@ class Scanner:
         if tri_opening:
             self.tri_prober.probe(now, rd.block, tri_opening, self.cross, self.pair_pools,
                                   dict(self.ref_prices), rd.basefee_wei, rd.l1_fee_wei)
+        if self.bus.due(now):
+            self.bus.collect(now)
         if self.recorder.due(now):
             quotes = self.recorder.record(now, dict(self.ref_prices))
             if quotes:
@@ -212,7 +218,7 @@ def episode_line(e):
             f"cex mid {fmt_px(e.best_mid)}")
 
 
-def status_line(block, results, tri=None):
+def status_line(block, results, tri=None, bus=None):
     parts = [f"blk {block}"]
     by_pair = {}
     for (pair, _key), r in results.items():
@@ -222,6 +228,8 @@ def status_line(block, results, tri=None):
         parts.append(f"{pair} best {r.key} {r.net_pct:+.3f}%")
     if tri is not None:
         parts.append(triangle.best_line(tri))
+    if bus is not None:
+        parts.append(cex_triangle.best_line(bus))
     return " | ".join(parts)
 
 
@@ -248,6 +256,9 @@ def main(argv=None):
             print()
             if scanner.cross:
                 triangle.print_table(scanner.last_tri)
+                print()
+            if scanner.bus.enabled:
+                cex_triangle.print_table(scanner.bus.last)
                 print()
             recorder.print_table(scanner.recorder.last_quotes, scanner.recorder.depth_usd)
         scanner.shutdown()
@@ -279,7 +290,9 @@ def run_forever(scanner, poll_seconds, sleep=time.sleep, clock=time.time, max_ro
             fails = 0
             if out:
                 tri = getattr(scanner, "last_tri", None) if getattr(scanner, "cross", None) else None
-                log(status_line(*out, tri=tri))
+                bus = getattr(scanner, "bus", None)
+                bus = bus.last if bus is not None and bus.enabled else None
+                log(status_line(*out, tri=tri, bus=bus))
         except RETRYABLE as e:
             fails += 1
             wait = min(30, 2 ** fails)

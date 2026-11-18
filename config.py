@@ -92,6 +92,26 @@ TRI_PROBE_MIN_NET_PCT = 0.02
 # Set to None to turn the triangle off.
 TRIANGLE_PAIRS = ("ETH", "BTC")
 
+# ---- Binance.US triangle (cex_triangle.py) ------------------------------------------
+# Public order books, no API key. For each quote currency: Q -> BTC -> ETH -> Q and the
+# reverse, sharing the ETHBTC book. Rows go in cex_tri_quotes. BUS_SECONDS = None turns it off.
+# Rate limit: 1200 weight/min per IP, 5 per book: 7 books every 4s = ~525/min. Your own
+# Binance.US trading from this PC uses the same limit, so don't go below 3s.
+BUS_SECONDS = 4
+BUS_SIZE_USD = 100.0
+BUS_BOOK_LEVELS = 20
+BUS_CROSS = "ETHBTC"
+BUS_TRIANGLES = [
+    {"quote": "USD",  "btc": "BTCUSD",  "eth": "ETHUSD"},
+    {"quote": "USDT", "btc": "BTCUSDT", "eth": "ETHUSDT"},
+    {"quote": "USDC", "btc": "BTCUSDC", "eth": "ETHUSDC"},
+]
+# Taker fee per symbol (fractions: 0.0002 = 0.02%). "default" covers any symbol not listed.
+# Check your account's fee page; some pairs may be lower.
+BUS_TAKER_FEES = {"default": 0.0002}
+BUS_MAX_WEIGHT = 800        # skip a round when Binance says we've used this much of 1200
+BUS_BACKOFF_S = 60          # pause at least this long after a 429/418
+
 # ---- pegged-pair recorder (data for the stat-arb project) -----------------------
 # Once a minute, each pair below is quoted both ways on every pool and one row per
 # pool goes in the pegged_quotes table. Price is "B per 1 A", so it sits near 1.0.

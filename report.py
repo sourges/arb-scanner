@@ -9,7 +9,8 @@ The last section summarizes the pegged-pair recorder (one quote per minute per
 pool): where each pair's mid sits versus 1.0, how much it wanders, and how often
 the best bid on one pool beat the best ask on another (a gross gap, before gas).
 TRIANGLE summarizes both triangle loops (every scan at $100), and TRIANGLE SIZE
-PROBES shows how the loops that opened held up at bigger sizes.
+PROBES shows how the loops that opened held up at bigger sizes. CEX TRIANGLE does
+the same for triangles inside one exchange (Binance.US).
 PEGGED POOLS then lists every pool: how often it set the best price, and its
 round trip at $100 and at the bigger depth size (a thin pool's blows up).
 
@@ -202,6 +203,25 @@ def tri_summary(conn, since_ts):
             for path, nets in sorted(per_loop.items())]
 
 
+def cex_tri_summary(conn, since_ts):
+    """Per one-exchange triangle loop: venue, rounds, rounds with net > 0, median and best net %,
+    median raw % (spreads only, before fees) and median book age."""
+    if not has_table(conn, "cex_tri_quotes"):
+        return []
+    per_loop = {}
+    for venue, path, net, raw, age in conn.execute(
+            "SELECT venue, path, net_edge, raw_edge, book_age FROM cex_tri_quotes WHERE ts >= ?",
+            (since_ts,)):
+        per_loop.setdefault((venue, path), []).append((net, raw, age))
+    out = []
+    for (venue, path), rows in sorted(per_loop.items()):
+        nets = [r[0] for r in rows]
+        out.append((venue, path, len(rows), sum(1 for n in nets if n > 0), statistics.median(nets),
+                    max(nets), statistics.median(r[1] for r in rows),
+                    statistics.median(r[2] for r in rows)))
+    return out
+
+
 def print_probe_table(conn, since, top, table, path_label, path_width):
     """The size table plus the top probed gaps, for either probe table."""
     sizes = probe_summary(conn, since, table)
@@ -282,6 +302,17 @@ def print_report(conn, since, min_usd, top):
 
     print("\nTRIANGLE SIZE PROBES (loops re-quoted at bigger sizes when they open; net after gas)")
     print_probe_table(conn, since, top, "tri_probes", "loop  leg1/leg2/leg3 pools", 52)
+
+    print("\nCEX TRIANGLE (one exchange, order books walked at $100; net after taker fees, raw before)")
+    cex_loops = cex_tri_summary(conn, since)
+    if not cex_loops:
+        print("  none yet")
+    else:
+        print(f"{'venue':<11}{'loop':<20}{'rounds':>8}{'% >0':>8}{'median net':>12}{'best net':>11}"
+              f"{'median raw':>12}{'age s':>7}")
+        for venue, path, n, pos, med, best, med_raw, age in cex_loops:
+            print(f"{venue:<11}{path:<20}{n:>8}{100 * pos / n:>7.2f}%{fmt_pct(med):>12}{fmt_pct(best):>11}"
+                  f"{fmt_pct(med_raw):>12}{age:>7.1f}")
 
     print("\nPEGGED PAIRS (recorder, once a minute; mid in bp away from 1.0, gap before gas)")
     print(f"{'pair':<14}{'minutes':>9}{'avg mid':>9}{'min':>8}{'max':>8}{'std':>7}{'gap>0':>8}{'best gap':>10}")
