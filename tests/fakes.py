@@ -19,6 +19,8 @@ WETH = config.PAIRS[0]["base"]["address"].lower()
 CBBTC = config.PAIRS[1]["base"]["address"].lower()
 WBTC = config.WBTC["address"].lower()
 USDT = config.USDT["address"].lower()
+CBETH = config.CBETH["address"].lower()     # decimals known; the token itself isn't (see tokens)
+WSTETH = config.WSTETH["address"].lower()
 
 UNI_FACTORY = "0x" + "a1" * 20
 UNI_QUOTER = "0x" + "a2" * 20
@@ -36,7 +38,7 @@ SEL = {name: abi.selector(sig) for name, sig in {
 
 USD_PER_UNIT = {USDC: 1.0, USDT: 1.0, CBBTC: 60000.0, WBTC: 60000.0}   # for pegged depth models
 
-DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8, WBTC: 8, USDT: 6}
+DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8, WBTC: 8, USDT: 6, CBETH: 18, WSTETH: 18}
 
 
 class Revert(Exception):

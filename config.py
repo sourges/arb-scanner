@@ -46,11 +46,12 @@ GAS_PRICE_ORACLE = "0x420000000000000000000000000000000000000F"
 
 USDC = {"address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "symbol": "USDC", "decimals": 6}
 CBBTC = {"address": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", "symbol": "cbBTC", "decimals": 8}
+WETH = {"address": "0x4200000000000000000000000000000000000006", "symbol": "WETH", "decimals": 18}
 
 PAIRS = [
     {
         "name": "ETH",
-        "base": {"address": "0x4200000000000000000000000000000000000006", "symbol": "WETH", "decimals": 18},
+        "base": WETH,
         "kraken": "ETHUSD",
         "coinbase": "ETH-USD",
     },
@@ -102,12 +103,21 @@ WBTC = {"address": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c", "symbol": "WBTC
 USDT = {"address": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", "symbol": "USDT", "decimals": 6}
 USDBC = {"address": "0xd9aAEc86B65D86f6a7B5B1b0c42FFA531710b6CA", "symbol": "USDbC", "decimals": 6}
 DAI = {"address": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", "symbol": "DAI", "decimals": 18}
+# Staked ETH (added Nov 18, 2026). Both earn staking rewards, so their price in WETH sits
+# ABOVE 1.0 and creeps up over time (mid shows as roughly +1,000 bp or more). stat-arb
+# measures the spread against that rising line. Sizes use the ETH price, so "$100" of
+# cbETH/wstETH is really a little more (one is worth more than 1 ETH); price ratios are unaffected.
+# Addresses: cbETH and Lido's wstETH on Base (Coinbase / Lido bridged tokens).
+CBETH = {"address": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22", "symbol": "cbETH", "decimals": 18}
+WSTETH = {"address": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452", "symbol": "wstETH", "decimals": 18}
 
 RECORD_PAIRS = [
     {"name": "cbBTC/WBTC", "a": CBBTC, "b": WBTC, "usd_ref": "BTC"},
     {"name": "USDT/USDC",  "a": USDT,  "b": USDC, "usd_ref": None},
     {"name": "USDbC/USDC", "a": USDBC, "b": USDC, "usd_ref": None},
     {"name": "DAI/USDC",   "a": DAI,   "b": USDC, "usd_ref": None},
+    {"name": "cbETH/WETH",  "a": CBETH,  "b": WETH, "usd_ref": "ETH"},
+    {"name": "wstETH/WETH", "a": WSTETH, "b": WETH, "usd_ref": "ETH"},
 ]
 
 # Aerodrome classic (v2-style) pools, for the RECORDER ONLY: the 2-second scan, triangle

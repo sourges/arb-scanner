@@ -40,10 +40,13 @@ Every scan the scanner also prices two loops that start and end in USDC:
 ## Pegged-pair recorder (data for the stat-arb project)
 
 Once a minute (inside the normal scan loop) the scanner also quotes pairs of tokens
-that are meant to be worth the same: **cbBTC/WBTC, USDT/USDC, USDbC/USDC, DAI/USDC**.
+that are meant to be worth the same: **cbBTC/WBTC, USDT/USDC, USDbC/USDC, DAI/USDC**, plus the
+staked-ETH pairs **cbETH/WETH, wstETH/WETH** (added Nov 18, 2026).
 Each pair is quoted both ways on every pool, $100 a side, in ONE extra eth_call.
 
-- Price is "B per 1 A", so it sits near 1.0. **bid** = what selling A gets, **ask** = what buying A costs (pool fee included).
+- Price is "B per 1 A", so it sits near 1.0. Staked ETH is the exception: it earns staking rewards,
+  so cbETH and wstETH are worth more than 1 WETH and their mid shows as roughly +1,000 bp or more,
+  creeping up over time. Their "$100" size is priced with ETH, so it's really a bit more. **bid** = what selling A gets, **ask** = what buying A costs (pool fee included).
 - **mid** = (best bid + best ask) / 2 across pools: the series stat arb studies. Shown in bp away from 1.0.
 - **gap** = best bid / best ask - 1: above 0 means buying on one pool and selling on another nets something before gas.
 - Rows go in the **pegged_quotes** table (ts, block, pair, pool, bid, ask, depth_usd, depth_bid, depth_ask); the log prints one `PEG ...` line a minute.
@@ -58,6 +61,9 @@ columns start then. Earlier pegged rows have no classic pools and NULL depth, so
 before and after aren't strictly comparable. For a like-for-like series, filter out pools
 labelled `aeroc-*`. The 2-second scan's pool set did not change.
 
+**Pairs added Nov 18, 2026:** cbETH/WETH and wstETH/WETH rows start then. The other pairs and
+the 2-second scan are unchanged.
+
 ## How prices are measured
 
 - **DEX:** each pool's QuoterV2 is asked "what comes out for $100 in?" and "what comes out for 0.05 ETH in?". All quotes, plus block number, base fee and L1 fee, go in ONE Multicall3 eth_call per block, which keeps a free RPC tier happy.
@@ -71,7 +77,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 156 tests ... OK)
+python -m unittest            (expect: Ran 160 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```

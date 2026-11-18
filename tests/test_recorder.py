@@ -61,9 +61,9 @@ class TestStartup(unittest.TestCase):
         rec, _, lines = make_recorder()
         self.assertEqual([p["name"] for p, _ in rec.pairs], ["cbBTC/WBTC", "USDT/USDC"])
         skipped = [line for line in lines if "skipping" in line]
-        self.assertEqual(len(skipped), 2)
-        self.assertTrue(any("USDbC/USDC" in line for line in skipped))
-        self.assertTrue(any("DAI/USDC" in line for line in skipped))
+        self.assertEqual(len(skipped), 4)          # the fake chain doesn't know these tokens
+        for name in ("USDbC/USDC", "DAI/USDC", "cbETH/WETH", "wstETH/WETH"):
+            self.assertTrue(any(name in line for line in skipped), name)
 
     def test_no_record_pairs_means_never_due(self):
         cfg = make_config(RECORD_PAIRS=[])
