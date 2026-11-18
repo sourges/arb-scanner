@@ -41,6 +41,11 @@ USD_PER_UNIT = {USDC: 1.0, USDT: 1.0, CBBTC: 60000.0, WBTC: 60000.0, WETH: 2000.
 DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8, WBTC: 8, USDT: 6, CBETH: 18, WSTETH: 18}
 
 
+POOL_INFO_SEL = {abi.selector(sig): field for field, sig in {
+    "token0": abi.SIG_TOKEN0, "token1": abi.SIG_TOKEN1, "fee": abi.SIG_FEE,
+    "tick_spacing": abi.SIG_TICK_SPACING, "factory": abi.SIG_FACTORY, "stable": abi.SIG_STABLE}.items()}
+
+
 class Revert(Exception):
     pass
 
@@ -82,6 +87,9 @@ class FakeChain:
         self.peg_impact = {}
         self.peg_max_usd = {}
         self.quote_gas = 100_000
+        # pool address -> {"token0", "token1", "fee", "tick_spacing", "factory", "stable"}
+        # for find_pool.py; a missing field reverts like a pool that doesn't have that function
+        self.pool_info = {}
         # size-probe depth model (empty = no slippage, every size fills):
         # (quoter, tier, base) -> fraction the price moves per $1,000 traded
         self.impact = {}
@@ -108,6 +116,13 @@ class FakeChain:
     # -- dispatch --
     def handle(self, target, cd):
         sel, args = cd[:4], cd[4:]
+        if target in self.pool_info and sel in POOL_INFO_SEL:       # find_pool.py lookups
+            field = POOL_INFO_SEL[sel]
+            if field not in self.pool_info[target]:
+                raise Revert()
+            typ = {"token0": "address", "token1": "address", "fee": "uint24",
+                   "tick_spacing": "int24", "factory": "address", "stable": "bool"}[field]
+            return encode([typ], [self.pool_info[target][field]])
         if target == MULTICALL and sel == SEL["block"]:
             return encode(["uint256"], [self.block])
         if target == MULTICALL and sel == SEL["basefee"]:

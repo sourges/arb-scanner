@@ -46,5 +46,14 @@ class TestAbi(unittest.TestCase):
                             "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 500)
 
 
+class TestSignedAndBool(unittest.TestCase):
+    def test_decode_int_keeps_the_sign(self):
+        self.assertEqual(abi.decode_int(encode(["int24"], [-5])), -5)
+        self.assertEqual(abi.decode_int(encode(["int24"], [2000])), 2000)
+
+    def test_decode_bool(self):
+        self.assertTrue(abi.decode_bool(encode(["bool"], [True])))
+        self.assertFalse(abi.decode_bool(encode(["bool"], [False])))
+
 if __name__ == "__main__":
     unittest.main()

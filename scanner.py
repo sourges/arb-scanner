@@ -146,6 +146,7 @@ class Scanner:
         quotes = [dex.pair_quote(cfg, p) for p in extras]
         infos = dex.read_tokens(self.rpc, cfg.MULTICALL3, [p["base"] for p in extras] + quotes)
         limit = getattr(cfg, "OFF_MARKET_PCT", 10.0)
+        wide = dex.discovery_dexes(cfg.DEXES, getattr(cfg, "EXTRA_DISCOVERY_TIERS", None))
         for i, pair in enumerate(extras):
             name = pair["name"]
             problem = None
@@ -161,7 +162,7 @@ class Scanner:
             pair = dict(pair, base=filled["base"], quote=filled["quote"])
             label = f"{pair['base']['symbol']}/{pair['quote']['symbol']}"
 
-            pools = dex.discover_pools(self.rpc, cfg.MULTICALL3, cfg.DEXES,
+            pools = dex.discover_pools(self.rpc, cfg.MULTICALL3, wide,
                                        pair["base"]["address"], pair["quote"]["address"])
             if not pools:
                 log(f"extra pair {name} skipped: no {label} pools on {', '.join(d['name'] for d in cfg.DEXES)}")

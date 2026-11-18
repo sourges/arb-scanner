@@ -91,6 +91,17 @@ EXTRA_PAIRS = [
      "coinbase": "VIRTUAL-USD"},
 ]
 
+# Pool discovery for the extra pairs asks each factory about these tiers IN ADDITION to
+# the DEX's own "tiers" in DEXES (added Nov 18, 2026). Smaller tokens often sit in 1% pools
+# (10000 on Uniswap/PancakeSwap, tick spacing 2000 on Aerodrome), and Aerodrome can enable
+# more tick spacings over time. ETH and BTC keep using DEXES' tiers only (unchanged).
+# Costs a few lookups in one call at startup; nothing per scan. Every pool found still goes
+# through the OFF_MARKET_PCT screen below. find_pool.py shows any pool's real fee/spacing.
+EXTRA_DISCOVERY_TIERS = {
+    "uni":  [10000],                    # 1% fee tier (Uniswap v3 and PancakeSwap v3)
+    "slip": [10, 500, 1000, 2000],      # more Aerodrome Slipstream tick spacings
+}
+
 # At startup, an extra pair's pool whose $100 price is more than this % away from the
 # pair's reference price is dropped as off-market (dead, abandoned or legacy pool), so it
 # can't show up as a fake gap. Logged. Not applied to ETH and BTC (unchanged).

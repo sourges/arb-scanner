@@ -32,6 +32,12 @@ SIG_BASEFEE = "getBasefee()"                                # Multicall3 helper
 SIG_L1_FEE_UPPER = "getL1FeeUpperBound(uint256)"            # Base GasPriceOracle
 SIG_GET_POOL_CLASSIC = "getPool(address,address,bool)"      # Aerodrome classic PoolFactory
 SIG_GET_AMOUNT_OUT = "getAmountOut(uint256,address)"        # Aerodrome classic Pool (fee taken out)
+SIG_TOKEN0 = "token0()"                                     # any v3-style or classic pool
+SIG_TOKEN1 = "token1()"
+SIG_FEE = "fee()"                                           # v3 / Slipstream pool fee (hundredths of a bip)
+SIG_TICK_SPACING = "tickSpacing()"                          # v3 / Slipstream pools
+SIG_FACTORY = "factory()"                                   # which factory made the pool
+SIG_STABLE = "stable()"                                     # Aerodrome classic pools
 
 
 # ---- encoders -----------------------------------------------------------------
@@ -107,6 +113,16 @@ def decode_address(data: bytes) -> str:
 def decode_uint(data: bytes) -> int:
     (v,) = decode(["uint256"], data)
     return int(v)
+
+
+def decode_int(data: bytes) -> int:
+    (v,) = decode(["int256"], data)
+    return int(v)
+
+
+def decode_bool(data: bytes) -> bool:
+    (v,) = decode(["bool"], data)
+    return bool(v)
 
 
 def decode_string(data: bytes) -> str:

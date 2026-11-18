@@ -122,6 +122,19 @@ def discover_pools(rpc, multicall_addr: str, dexes, token_a: str, token_b: str):
     return pools
 
 
+def discovery_dexes(dexes, extra_tiers):
+    """Copies of DEXES with extra_tiers[kind] added to each DEX's own tiers (no duplicates,
+    original order first). Used for the extra pairs' pool discovery only."""
+    out = []
+    for d in dexes:
+        tiers = list(d["tiers"])
+        for t in (extra_tiers or {}).get(d["kind"], []):
+            if t not in tiers:
+                tiers.append(t)
+        out.append(dict(d, tiers=tiers))
+    return out
+
+
 def pair_quote(cfg, pair):
     """The token a pair's pools price against: pair["quote"], default USDC."""
     return pair.get("quote", cfg.USDC)

@@ -122,6 +122,19 @@ They ride in the same eth_call, so no extra RPC calls.
 - Size probes work for every pair. dex>dex probes and triangle probes now have separate
   hourly caps (`PROBE_MAX_PER_HOUR`, `TRI_PROBE_MAX_PER_HOUR`, 60 each).
 - `--once` prints how long one scan took. It must stay well under `POLL_SECONDS`.
+- Extra pairs search more pool tiers than ETH and BTC (`EXTRA_DISCOVERY_TIERS`): the 1% tier
+  on Uniswap/PancakeSwap and Aerodrome tick spacings 10, 500, 1,000 and 2,000. Smaller tokens
+  often sit in those pools.
+
+### Checking a pool: find_pool.py
+
+```
+python find_pool.py 0x868eed6bad4bd368cd053b766f84cc727697589a
+```
+
+Reads a pool's tokens, fee, tick spacing and factory from the chain (one call) and says
+whether the scanner covers it: `scanned`, `extra pairs only`, or `NOT scanned` (then add
+its tier to `EXTRA_DISCOVERY_TIERS`). Works for classic pools too.
 - Episode counts before and after Nov 18 aren't directly comparable: there are more pairs.
 
 ## Size probes (how much could a gap absorb?)
