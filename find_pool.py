@@ -88,7 +88,7 @@ def describe(rpc, cfg, address):
     if known:
         name, kind, own = known
         tier = fee if kind == "uni" else ts
-        label = f"{name}-{'ts' if kind == 'slip' else ''}{tier}"
+        label = f"{name}-{'ts' if kind in ('slip', 'aero') else ''}{tier}"
         lines.append(f"scanner {label}: {coverage(cfg, kind, tier, own)}")
     return lines
 

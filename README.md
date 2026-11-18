@@ -101,6 +101,26 @@ python report.py --min-usd 0.10 --top 30
 - **scan_prices** table: the prices behind every scan (see "Price rows" below). Not in `report.py` yet.
 - **PEGGED PAIRS** section of `report.py`: per pair, minutes recorded, mid vs 1.0 (avg/min/max/std in bp), how many minutes had a gap > 0, and the best gap.
 
+## Aero (added Nov 18, 2026)
+
+Aero is the Aerodrome + Velodrome merger (launched Oct 22, 2026) with "Slipstream V3"
+pools and **dynamic fees** that rise when markets move fast. It holds some of Base's
+biggest pools (for example WETH/USDC `0x4a7a...366c`, about $10M liquidity). It is in
+`DEXES` as `aerov3`, so **every** scan uses it: ETH, BTC, the extra pairs, the triangle,
+both kinds of size probes and the recorder. Labels look like `aerov3-ts50`.
+
+- Pools are found like Aerodrome's (factory `getPool` by tick spacing: 1, 10, 50, 100,
+  150, 200, 250). Quotes go through Aero's Metaquoter, which takes the **pool address**.
+- The Metaquoter gives no gas estimate, so `dex.AERO_QUOTE_GAS` (130,000) is used; at Base
+  gas prices that is a fraction of a cent either way.
+- **Caution:** Aero has an MEV tax module that charges swaps paying high priority fees,
+  which competing bots do. Quotes are simulations without that tax, so a real trade on Aero
+  can cost more than quoted. Treat Aero gaps as an upper bound.
+- Pool set change: from Nov 18, 2026, data includes Aero pools. Episode counts, triangle
+  loops and recorder rows before and after aren't directly comparable.
+- Addresses: dromos-labs/metadex-slipstream-public, `deployment-addresses/cl-base.json`.
+- `find_pool.py` names Aero pools `aerov3` and reports them as scanned.
+
 ## Extra pairs (added Nov 18, 2026)
 
 Besides ETH/USDC and cbBTC/USDC, the 2-second scan also covers less-watched pairs from

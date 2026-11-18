@@ -79,20 +79,15 @@ def build_calls(cfg, pair, buy_pool, sell_pool, sizes, ref_price, quote_usd=1.0)
         usdc_in = int(size / quote_usd * 10 ** usdc["decimals"])
         x_raw = int(size / ref_price * 10 ** base["decimals"])
         x_raws.append(x_raw)
-        calls.append((buy_pool.quoter, abi.encode_quote(
-            buy_pool.kind, usdc["address"], base["address"], usdc_in, buy_pool.tier)))
-        calls.append((sell_pool.quoter, abi.encode_quote(
-            sell_pool.kind, base["address"], usdc["address"], x_raw, sell_pool.tier)))
+        calls.append(dex.quote_call(buy_pool, usdc["address"], base["address"], usdc_in))
+        calls.append(dex.quote_call(sell_pool, base["address"], usdc["address"], x_raw))
     return calls, x_raws
 
 
-def _quote(ok_ret):
-    """(amount out, gas) or (None, None) if the quoter reverted. A 0 amount comes back
-    as 0 and is treated as "can't fill" by quote_sizes."""
-    ok, ret = ok_ret
-    if not ok or len(ret) < 128:
-        return None, None
-    return abi.decode_quote(ret)
+def _quote(ok_ret, kind="uni"):
+    """(amount out, gas) or (None, None) if the quote failed or came back 0 ("can't fill").
+    Any pool kind: see dex.read_quote."""
+    return dex.read_quote(kind, ok_ret)
 
 
 def quote_sizes(rpc, cfg, pair, buy_pool, sell_pool, sizes, ref_price, basefee_wei, l1_fee_wei, eth_usd,
@@ -109,8 +104,8 @@ def quote_sizes(rpc, cfg, pair, buy_pool, sell_pool, sizes, ref_price, basefee_w
 
     out = []
     for i, size in enumerate(sizes):
-        buy_out, buy_gas = _quote(results[2 * i])
-        sell_out, sell_gas = _quote(results[2 * i + 1])
+        buy_out, buy_gas = _quote(results[2 * i], buy_pool.kind)
+        sell_out, sell_gas = _quote(results[2 * i + 1], sell_pool.kind)
         base_amount = buy_out / 10 ** base_dec if buy_out else None
         usd_back = None
         if base_amount and sell_out and x_raws[i]:

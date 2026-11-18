@@ -16,7 +16,7 @@ from rpc import RpcError
 @dataclass
 class Pool:
     dex: str
-    kind: str        # "uni" or "slip" (scanner DEXES); "classic" is recorder-only, see recorder.py
+    kind: str        # "uni", "slip" or "aero" (scanner DEXES); "classic" is recorder-only
     tier: int        # fee tier (uni), tick spacing (slip), or 1 = stable / 0 = volatile (classic)
     address: str
     quoter: str
@@ -25,7 +25,7 @@ class Pool:
     def label(self) -> str:
         if self.kind == "classic":
             return f"{self.dex}-{'stable' if self.tier else 'vol'}"
-        return f"{self.dex}-{'ts' if self.kind == 'slip' else ''}{self.tier}"
+        return f"{self.dex}-{'ts' if self.kind in ('slip', 'aero') else ''}{self.tier}"
 
 
 @dataclass
@@ -122,6 +122,45 @@ def discover_pools(rpc, multicall_addr: str, dexes, token_a: str, token_b: str):
     return pools
 
 
+# Aero's Metaquoter returns no gas estimate; this is a typical concentrated-liquidity swap.
+# At Base gas prices it is a fraction of a cent either way.
+AERO_QUOTE_GAS = 130_000
+
+
+def quote_call(p, token_in, token_out, amount):
+    """(target, calldata) for one quote on pool p, whatever kind it is:
+        uni / slip   QuoterV2.quoteExactInputSingle (by fee tier / tick spacing)
+        aero         Aero Metaquoter.quoteExactInputSingleV3 (by pool address)
+        classic      the pool's own getAmountOut (recorder only)"""
+    if p.kind == "classic":
+        return p.address, abi.encode_get_amount_out(amount, token_in)
+    if p.kind == "aero":
+        return p.quoter, abi.encode_metaquote(p.address, token_in, amount)
+    return p.quoter, abi.encode_quote(p.kind, token_in, token_out, amount, p.tier)
+
+
+def read_quote(kind, result):
+    """(amount out, gas units) from one (ok, return bytes), or (None, None) if the quote
+    failed or came back 0. Classic pools give no gas (None); Aero gives AERO_QUOTE_GAS."""
+    ok, ret = result
+    if not ok:
+        return None, None
+    if kind == "classic":
+        if len(ret) < 32:
+            return None, None
+        out = abi.decode_uint(ret)
+        return (out, None) if out else (None, None)
+    if kind == "aero":
+        if len(ret) < 96:
+            return None, None
+        out = abi.decode_metaquote(ret)
+        return (out, AERO_QUOTE_GAS) if out else (None, None)
+    if len(ret) < 128:
+        return None, None
+    out, gas = abi.decode_quote(ret)
+    return (out, gas) if out else (None, None)
+
+
 def discovery_dexes(dexes, extra_tiers):
     """Copies of DEXES with extra_tiers[kind] added to each DEX's own tiers (no duplicates,
     original order first). Used for the extra pairs' pool discovery only."""
@@ -172,9 +211,9 @@ def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd, cross=None, quote_us
         for p in pools:
             r = PoolQuoteRaw(pool=p, x_base_raw=x_base_raw)
             raws[name].append(r)
-            calls.append((p.quoter, abi.encode_quote(p.kind, quote["address"], base["address"], quote_in, p.tier)))
+            calls.append(quote_call(p, quote["address"], base["address"], quote_in))
             layout.append((r, "buy"))
-            calls.append((p.quoter, abi.encode_quote(p.kind, base["address"], quote["address"], x_base_raw, p.tier)))
+            calls.append(quote_call(p, base["address"], quote["address"], x_base_raw))
             layout.append((r, "sell"))
 
     cross_raws = []
@@ -186,9 +225,9 @@ def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd, cross=None, quote_us
         for p in cross_pools:
             c = CrossQuoteRaw(pool=p, a_in_raw=a_in, b_in_raw=b_in)
             cross_raws.append(c)
-            calls.append((p.quoter, abi.encode_quote(p.kind, ta["address"], tb["address"], a_in, p.tier)))
+            calls.append(quote_call(p, ta["address"], tb["address"], a_in))
             layout.append((c, "a_to_b"))
-            calls.append((p.quoter, abi.encode_quote(p.kind, tb["address"], ta["address"], b_in, p.tier)))
+            calls.append(quote_call(p, tb["address"], ta["address"], b_in))
             layout.append((c, "b_to_a"))
 
     results = multicall(rpc, cfg.MULTICALL3, calls)
@@ -202,11 +241,9 @@ def quote_round(rpc, cfg, pair_pools, ref_prices, size_usd, cross=None, quote_us
         quotes=raws,
         cross=cross_raws,
     )
-    for (r, side), (ok, ret) in zip(layout, results[3:]):
-        if not ok or len(ret) < 128:
-            continue
-        out, gas = abi.decode_quote(ret)
-        if out == 0:
+    for (r, side), result in zip(layout, results[3:]):
+        out, gas = read_quote(r.pool.kind, result)
+        if not out:
             continue
         if side == "buy":
             r.buy_out_raw, r.buy_gas = out, gas
@@ -285,16 +322,11 @@ def pool_buy_prices(rpc, cfg, pair, pools, quote_usd, size_usd):
     One eth_call. Used at startup to get a first reference price and spot off-market pools."""
     base, quote = pair["base"], pair_quote(cfg, pair)
     quote_in = int(size_usd / quote_usd * 10 ** quote["decimals"])
-    calls = [(p.quoter, abi.encode_quote(p.kind, quote["address"], base["address"], quote_in, p.tier))
-             for p in pools]
+    calls = [quote_call(p, quote["address"], base["address"], quote_in) for p in pools]
     out = {}
-    for p, (ok, ret) in zip(pools, multicall(rpc, cfg.MULTICALL3, calls)):
-        got = None
-        if ok and len(ret) >= 128:
-            amount, _gas = abi.decode_quote(ret)
-            if amount:
-                got = size_usd / (amount / 10 ** base["decimals"])
-        out[p.label] = got
+    for p, result in zip(pools, multicall(rpc, cfg.MULTICALL3, calls)):
+        amount, _gas = read_quote(p.kind, result)
+        out[p.label] = size_usd / (amount / 10 ** base["decimals"]) if amount else None
     return out
 
 

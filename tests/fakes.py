@@ -27,6 +27,8 @@ UNI_QUOTER = "0x" + "a2" * 20
 SLIP_FACTORY = "0x" + "b1" * 20
 SLIP_QUOTER = "0x" + "b2" * 20
 CLASSIC_FACTORY = "0x" + "d1" * 20
+AERO_FACTORY = "0x" + "e1" * 20     # fake Aero (Slipstream V3) factory and Metaquoter
+AERO_METAQUOTER = "0x" + "e3" * 20
 CLASSIC_USDT_STABLE = "0x" + "d2" * 20   # Aerodrome-classic-style USDT/USDC stable pool
 
 SEL = {name: abi.selector(sig) for name, sig in {
@@ -40,6 +42,8 @@ USD_PER_UNIT = {USDC: 1.0, USDT: 1.0, CBBTC: 60000.0, WBTC: 60000.0, WETH: 2000.
 
 DECIMALS = {USDC: 6, WETH: 18, CBBTC: 8, WBTC: 8, USDT: 6, CBETH: 18, WSTETH: 18}
 
+
+METAQUOTE_SEL = abi.selector(abi.SIG_METAQUOTE_V3)
 
 POOL_INFO_SEL = {abi.selector(sig): field for field, sig in {
     "token0": abi.SIG_TOKEN0, "token1": abi.SIG_TOKEN1, "fee": abi.SIG_FEE,
@@ -90,6 +94,8 @@ class FakeChain:
         # pool address -> {"token0", "token1", "fee", "tick_spacing", "factory", "stable"}
         # for find_pool.py; a missing field reverts like a pool that doesn't have that function
         self.pool_info = {}
+        # Aero pools quoted by address: pool -> (token a, token b, price as b per a, fee)
+        self.aero_pools = {}
         # size-probe depth model (empty = no slippage, every size fills):
         # (quoter, tier, base) -> fraction the price moves per $1,000 traded
         self.impact = {}
@@ -116,6 +122,18 @@ class FakeChain:
     # -- dispatch --
     def handle(self, target, cd):
         sel, args = cd[:4], cd[4:]
+        if target == AERO_METAQUOTER and sel == METAQUOTE_SEL:    # Aero Metaquoter
+            pool, tin, amount, _limit = decode(["address", "address", "uint256", "uint160"], args)
+            info = self.aero_pools.get(pool.lower())
+            if info is None:
+                raise Revert()
+            a, b, price, fee = info
+            tin = tin.lower()
+            if tin not in (a, b):
+                raise Revert()
+            tout, rate = (b, price) if tin == a else (a, 1 / price)
+            out = int(amount / 10 ** DECIMALS[tin] * rate * (1 - fee) * 10 ** DECIMALS[tout])
+            return encode(["uint256", "uint160", "uint32"], [out, 0, 0])
         if target in self.pool_info and sel in POOL_INFO_SEL:       # find_pool.py lookups
             field = POOL_INFO_SEL[sel]
             if field not in self.pool_info[target]:
@@ -138,7 +156,12 @@ class FakeChain:
         if sel in (SEL["pool_uni"], SEL["pool_slip"]):
             t = "uint24" if sel == SEL["pool_uni"] else "int24"
             _a, _b, tier = decode(["address", "address", t], args)
-            return encode(["address"], [self.pools.get((target, tier), abi.ZERO_ADDRESS)])
+            pool = self.pools.get((target, tier), abi.ZERO_ADDRESS)
+            if pool in self.aero_pools:        # Aero pools only exist for their own token pair
+                a, b = self.aero_pools[pool][:2]
+                if {_a.lower(), _b.lower()} != {a, b}:
+                    pool = abi.ZERO_ADDRESS
+            return encode(["address"], [pool])
         if target == CLASSIC_FACTORY and sel == SEL["pool_classic"]:
             a, b, stable = decode(["address", "address", "bool"], args)
             pool = self.classic_pools.get((frozenset({a.lower(), b.lower()}), bool(stable)))

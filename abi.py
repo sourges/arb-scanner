@@ -38,6 +38,9 @@ SIG_FEE = "fee()"                                           # v3 / Slipstream po
 SIG_TICK_SPACING = "tickSpacing()"                          # v3 / Slipstream pools
 SIG_FACTORY = "factory()"                                   # which factory made the pool
 SIG_STABLE = "stable()"                                     # Aerodrome classic pools
+# Aero (Aerodrome + Velodrome, Oct 2026) Slipstream V3: no QuoterV2; its Metaquoter quotes a
+# pool by ADDRESS and returns (amountOut, sqrtPriceX96After, initializedTicksCrossed), no gas.
+SIG_METAQUOTE_V3 = "quoteExactInputSingleV3(address,address,uint256,uint160)"
 
 
 # ---- encoders -----------------------------------------------------------------
@@ -45,7 +48,7 @@ SIG_STABLE = "stable()"                                     # Aerodrome classic 
 def encode_get_pool(kind: str, token_a: str, token_b: str, tier: int) -> bytes:
     if kind == "uni":
         sig, t = SIG_GET_POOL_UNI, "uint24"
-    elif kind == "slip":
+    elif kind in ("slip", "aero"):          # Aero's factory has the same getPool(..., int24)
         sig, t = SIG_GET_POOL_SLIP, "int24"
     else:
         raise ValueError(f"unknown dex kind {kind!r}")
@@ -63,6 +66,18 @@ def encode_quote(kind: str, token_in: str, token_out: str, amount_in: int, tier:
         raise ValueError(f"unknown dex kind {kind!r}")
     args = (_addr(token_in), _addr(token_out), int(amount_in), tier, 0)
     return selector(sig) + encode([tup], [args])
+
+
+def encode_metaquote(pool: str, token_in: str, amount_in: int) -> bytes:
+    """Aero Metaquoter.quoteExactInputSingleV3(pool, tokenIn, amountIn, sqrtPriceLimitX96=0)."""
+    return selector(SIG_METAQUOTE_V3) + encode(["address", "address", "uint256", "uint160"],
+                                               [_addr(pool), _addr(token_in), int(amount_in), 0])
+
+
+def decode_metaquote(data: bytes) -> int:
+    """Amount out from a Metaquoter reply (it has no gas estimate)."""
+    amount_out, _sqrt, _ticks = decode(["uint256", "uint160", "uint32"], data)
+    return int(amount_out)
 
 
 def encode_get_pool_classic(token_a: str, token_b: str, stable: bool) -> bytes:

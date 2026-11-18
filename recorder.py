@@ -101,25 +101,14 @@ def discover_classic_pools(rpc, multicall_addr, classic_dexes, token_a, token_b)
 
 
 def _quote_call(p, token_in, token_out, amount):
-    """(target, calldata) for one quote: QuoterV2 for v3-style pools, getAmountOut for classic."""
-    if p.kind == "classic":
-        return p.address, abi.encode_get_amount_out(amount, token_in)
-    return p.quoter, abi.encode_quote(p.kind, token_in, token_out, amount, p.tier)
+    """(target, calldata) for one quote on any pool kind (uni, slip, aero, classic)."""
+    return dex.quote_call(p, token_in, token_out, amount)
 
 
 def _amount_out(result, kind):
-    """Amount out in raw units, or None if the call failed or returned 0."""
-    ok, ret = result
-    if not ok:
-        return None
-    if kind == "classic":
-        if len(ret) < 32:
-            return None
-        return abi.decode_uint(ret) or None
-    if len(ret) < 128:
-        return None
-    out, _gas = abi.decode_quote(ret)
-    return out or None
+    """Amount out in raw units, or None if the call failed or returned 0 (any pool kind)."""
+    out, _gas = dex.read_quote(kind, result)
+    return out
 
 
 def _price(pair, x_a, y_b, b_out, a_out):

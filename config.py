@@ -204,6 +204,7 @@ RECORD_CLASSIC_DEXES = [
 
 # kind "uni"  = Uniswap-v3-style pools keyed by fee tier (in hundredths of a bip: 500 = 0.05%)
 # kind "slip" = Aerodrome Slipstream pools keyed by tick spacing
+# kind "aero" = Aero Slipstream V3 pools keyed by tick spacing, quoted by pool address
 # Pools are looked up from each factory at startup; tiers with no pool are skipped.
 DEXES = [
     {"name": "univ3", "kind": "uni",
@@ -227,4 +228,17 @@ DEXES = [
      "factory": "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef",
      "quoter":  "0x514c8B5f54112481E28028F1166Bd78501089259",
      "tiers": [1, 50, 100, 200]},
+    # Aero (added Nov 18, 2026): the Aerodrome + Velodrome merger, launched Oct 22, 2026, with
+    # "Slipstream V3" pools and DYNAMIC fees (they rise when markets move fast). It holds some
+    # of Base's biggest pools, e.g. WETH/USDC 0x4a7a...366c. Pools are found like Aerodrome's
+    # (getPool by tick spacing); quotes go through Aero's Metaquoter, which takes the POOL
+    # ADDRESS and gives no gas estimate (dex.AERO_QUOTE_GAS is used instead).
+    # Tick spacings are the 7 enabled at deployment (its factory's constructor arguments).
+    # Addresses: dromos-labs/metadex-slipstream-public, deployment-addresses/cl-base.json.
+    # CAUTION: Aero has an MEV tax module that charges swaps paying high priority fees.
+    # Quotes are simulations without it, so real trades on Aero can cost more than quoted.
+    {"name": "aerov3", "kind": "aero",
+     "factory": "0x9CB220581b91b0C83223012FE69688b92aD07a76",
+     "quoter":  "0x1dDfeC5058180C207F55BB77D95AcDd0d8227868",
+     "tiers": [1, 10, 50, 100, 150, 200, 250]},
 ]

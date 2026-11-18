@@ -65,11 +65,9 @@ class TriProbeResult:
         return ((self.usd_back - self.gas_usd) / self.size_usd - 1) * 100 if self.filled else None
 
 
-def _quote(ok_ret):
-    ok, ret = ok_ret
-    if not ok or len(ret) < 128:
-        return None, None
-    return abi.decode_quote(ret)
+def _quote(ok_ret, kind="uni"):
+    """(amount out, gas) or (None, None). Any pool kind: see dex.read_quote."""
+    return dex.read_quote(kind, ok_ret)
 
 
 def build_calls(cfg, tok1, tok2, pools, sizes, ref1, ref2):
@@ -83,9 +81,9 @@ def build_calls(cfg, tok1, tok2, pools, sizes, ref1, ref2):
         x1 = int(size / ref1 * 10 ** tok1["decimals"])
         x2 = int(size / ref2 * 10 ** tok2["decimals"])
         xs.append((x1, x2))
-        calls.append((p1.quoter, abi.encode_quote(p1.kind, usdc["address"], tok1["address"], usdc_in, p1.tier)))
-        calls.append((p2.quoter, abi.encode_quote(p2.kind, tok1["address"], tok2["address"], x1, p2.tier)))
-        calls.append((p3.quoter, abi.encode_quote(p3.kind, tok2["address"], usdc["address"], x2, p3.tier)))
+        calls.append(dex.quote_call(p1, usdc["address"], tok1["address"], usdc_in))
+        calls.append(dex.quote_call(p2, tok1["address"], tok2["address"], x1))
+        calls.append(dex.quote_call(p3, tok2["address"], usdc["address"], x2))
     return calls, xs
 
 
@@ -104,7 +102,7 @@ def quote_sizes(rpc, cfg, loop, tok1, tok2, pools, sizes, ref1, ref2,
     labels = tuple(p.label for p in pools)
     out = []
     for i, size in enumerate(sizes):
-        (o1, g1), (o2, g2), (o3, g3) = (_quote(results[3 * i + k]) for k in range(3))
+        (o1, g1), (o2, g2), (o3, g3) = (_quote(results[3 * i + k], pools[k].kind) for k in range(3))
         x1, x2 = xs[i]
         usd_back = None
         if o1 and o2 and o3 and x1 and x2:
