@@ -64,6 +64,17 @@ labelled `aeroc-*`. The 2-second scan's pool set did not change.
 **Pairs added Nov 18, 2026:** cbETH/WETH and wstETH/WETH rows start then. The other pairs and
 the 2-second scan are unchanged.
 
+**Added Nov 25, 2026:**
+- **cbETH/wstETH** pair: does a *direct* pool exist? Going cbETH -> WETH -> wstETH costs two swaps
+  per leg (~2.3 bp round trip), which ate the stat-arb signal.
+- **Coinbase quotes** (`RECORD_CEX`): in the same minute, Coinbase's best bid/ask for **CBETH-ETH**
+  and **USDT-USDC** go in the **cex_quotes** table (shared columns ts, strategy='peg_cex',
+  venue='coinbase', path=pair, raw_edge, then block, product, bid, ask, bid_size, ask_size,
+  fetch_s). raw_edge = Coinbase mid / that minute's best Base mid - 1, in %. Coinbase charges
+  0% maker on these limit-only books. Requests run in parallel with the Base eth_call; one
+  failing or slower than `RECORD_CEX_TIMEOUT_S` is logged and skipped, and never costs the
+  Base rows. `scanner.py --once` prints them under the pegged table ("vs base bp").
+
 ## How prices are measured
 
 - **DEX:** each pool's QuoterV2 is asked "what comes out for $100 in?" and "what comes out for 0.05 ETH in?". All quotes, plus block number, base fee and L1 fee, go in ONE Multicall3 eth_call per block, which keeps a free RPC tier happy.
@@ -77,7 +88,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 292 tests ... OK)
+python -m unittest            (expect: Ran 306 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```

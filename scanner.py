@@ -62,7 +62,8 @@ class Scanner:
         self.last_block = None
         self.book_failures = 0
         self.pool = ThreadPoolExecutor(max_workers=8)
-        self.recorder = recorder.Recorder(cfg, rpc, conn, log)
+        self.recorder = recorder.Recorder(cfg, rpc, conn, log, cex_fetchers=self.fetchers,
+                                          executor=self.pool)
         self.prober = probe.Prober(cfg, rpc, conn, log, clock)
         # triangle probes get their own hourly cap, so they can't use up the dex>dex budget
         self.tri_cap = probe.HourlyCap(getattr(cfg, "TRI_PROBE_MAX_PER_HOUR",
@@ -442,6 +443,9 @@ def main(argv=None):
                 cex_triangle.print_table(scanner.bus.last)
                 print()
             recorder.print_table(scanner.recorder.last_quotes, scanner.recorder.depth_usd)
+            if scanner.recorder.last_cex:
+                print()
+                recorder.print_cex_table(scanner.recorder.last_cex)
         scanner.shutdown()
         return
 

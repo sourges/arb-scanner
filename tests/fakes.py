@@ -228,6 +228,7 @@ def make_config(**overrides):
     ]
     cfg.DB_PATH = ":memory:"
     cfg.RECORD_CLASSIC_DEXES = []   # tests that want classic pools pass the fake factory
+    cfg.RECORD_CEX = []             # Coinbase recorder quotes off; tests/test_recorder_cex.py turns them on
     cfg.BUS_SECONDS = None          # Binance.US off: tests never touch the network
     cfg.EXTRA_PAIRS = []            # extra pairs off by default; tests/test_extra_pairs.py turns them on
     for k, v in overrides.items():

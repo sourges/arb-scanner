@@ -197,7 +197,21 @@ RECORD_PAIRS = [
     {"name": "DAI/USDC",   "a": DAI,   "b": USDC, "usd_ref": None},
     {"name": "cbETH/WETH",  "a": CBETH,  "b": WETH, "usd_ref": "ETH"},
     {"name": "wstETH/WETH", "a": WSTETH, "b": WETH, "usd_ref": "ETH"},
+    # Added Nov 25, 2026: is there a DIRECT cbETH/wstETH pool? Going through WETH costs two
+    # swaps per leg (~2.3 bp round trip), which ate the stat-arb signal (~1-2 bp per trade).
+    {"name": "cbETH/wstETH", "a": CBETH, "b": WSTETH, "usd_ref": "ETH"},
 ]
+
+# Coinbase books for the same pegged pairs, recorded in the SAME minute as the Base quotes
+# (table cex_quotes). Coinbase charges 0% maker on these (limit-only books), so the
+# Coinbase-vs-Base gap is the stat-arb question. Best bid/ask only, public endpoint, no key.
+# "pair" must match a RECORD_PAIRS name; the price is quoted the same way (B per 1 A).
+# Added Nov 25, 2026.
+RECORD_CEX = [
+    {"pair": "cbETH/WETH", "venue": "coinbase", "product": "CBETH-ETH"},
+    {"pair": "USDT/USDC",  "venue": "coinbase", "product": "USDT-USDC"},
+]
+RECORD_CEX_TIMEOUT_S = 4.0     # a slow Coinbase reply is dropped for that minute
 
 # Aerodrome classic (v2-style) pools, for the RECORDER ONLY: the 2-second scan, triangle
 # and size probes use DEXES below and never see these. One stable pool and one volatile

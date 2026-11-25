@@ -28,6 +28,13 @@ Depth: each pool is also quoted at RECORD_DEPTH_USD (e.g. $1,000) in the same ca
 A deep pool's $1,000 round trip is about its $100 round trip; a thin pool's is much
 worse, or it can't fill at all. The best bid/ask (and so mid and gap) still use $100.
 
+Coinbase (Nov 25, 2026): for the pairs in config.RECORD_CEX, the same minute also logs
+Coinbase's best bid/ask (table cex_quotes). Coinbase charges 0% maker on these limit-only
+books, so "Coinbase vs Base" is a stat-arb question. raw_edge = Coinbase mid / that minute's
+best Base mid - 1, in %. The Coinbase requests run in parallel with the Base eth_call; one
+failing or slow (over RECORD_CEX_TIMEOUT_S) is logged and skipped, and never stops the
+Base rows (or the scanner).
+
 Read-only and best-effort: a token that fails its check disables only that pair,
 and a failed minute is logged and skipped. The scanner keeps going either way.
 Resolution: amounts are whole token units, so at $100 an 8-decimal BTC token is
@@ -35,6 +42,7 @@ about 166,000 sats and prices are good to roughly 0.1 bp.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import abi
@@ -50,6 +58,25 @@ class PegQuote:
     ask: float | None
     depth_bid: float | None = None   # same pool at RECORD_DEPTH_USD (None = off, or can't fill)
     depth_ask: float | None = None
+
+
+@dataclass
+class CexQuote:
+    ts: float
+    venue: str
+    pair: str            # the RECORD_PAIRS name it matches, e.g. "cbETH/WETH"
+    product: str         # the exchange's name, e.g. "CBETH-ETH"
+    bid: float | None
+    ask: float | None
+    bid_size: float | None
+    ask_size: float | None
+    fetch_s: float       # how long the request took
+    block: int | None    # that minute's Base block (None if the Base quotes failed)
+    raw_edge: float | None   # % : CEX mid / best Base mid - 1 (None without both mids)
+
+    @property
+    def mid(self):
+        return None if self.bid is None or self.ask is None else (self.bid + self.ask) / 2
 
 
 @dataclass
@@ -222,8 +249,20 @@ def print_table(quotes, depth_usd=None):
               f" {fmt_rt(rt):>11} {fmt_rt(rt_big):>13}")
 
 
+def print_cex_table(rows):
+    """Coinbase rows for scanner.py --once: book, round trip in bp, and edge vs Base in bp."""
+    if not rows:
+        return
+    print(f"{'cex pair':<14} {'venue/product':<20} {'bid':>12} {'ask':>12} {'rt bp':>8} {'vs base bp':>11}")
+    for r in rows:
+        rt = round_trip_bp(r.bid, r.ask)
+        edge = f"{r.raw_edge * 100:+.1f}" if r.raw_edge is not None else "-"
+        print(f"{r.pair:<14} {r.venue + ' ' + r.product:<20} {fmt_px(r.bid):>12} {fmt_px(r.ask):>12}"
+              f" {fmt_rt(rt):>8} {edge:>11}")
+
+
 class Recorder:
-    def __init__(self, cfg, rpc, conn, log):
+    def __init__(self, cfg, rpc, conn, log, cex_fetchers=None, executor=None):
         self.cfg = cfg
         self.rpc = rpc
         self.conn = conn
@@ -233,6 +272,10 @@ class Recorder:
         self.last_quotes = []
         self.failures = 0
         self.depth_usd = getattr(cfg, "RECORD_DEPTH_USD", None)
+        self.cex_fetchers = cex_fetchers or {}   # venue -> fetch(product) -> cex.Book
+        self.executor = executor                 # runs CEX requests alongside the eth_call
+        self.last_cex = []
+        self.cex_failures = 0
 
     def startup(self):
         cfg = self.cfg
@@ -263,15 +306,67 @@ class Recorder:
         return bool(self.pairs) and int(now // self.cfg.RECORD_SECONDS) != self.last_minute
 
     def record(self, now, ref_prices):
-        """Quote every pair once and store the rows. Never raises: a failure skips this minute."""
+        """Quote every pair once and store the rows. Never raises: a failure skips this minute
+        (Base and CEX separately: a Coinbase problem never costs the Base rows, or vice versa)."""
         self.last_minute = int(now // self.cfg.RECORD_SECONDS)   # set first: a failure waits a minute
+        jobs = self._start_cex()
+        block, quotes = None, []
         try:
             block, quotes = quote_pegged(self.rpc, self.cfg, self.pairs, ref_prices,
                                          self.cfg.RECORD_SIZE_USD, self.depth_usd)
         except Exception as e:      # RPC error, missing reference price, bad reply...
             self.failures += 1
             self.log(f"recorder: minute skipped ({type(e).__name__}: {e})")
-            return []
-        db.insert_pegged(self.conn, now, block, quotes, self.depth_usd)
-        self.last_quotes = quotes
+            quotes = []
+        else:
+            db.insert_pegged(self.conn, now, block, quotes, self.depth_usd)
+            self.last_quotes = quotes
+        rows = self._finish_cex(jobs, now, block, quotes)
+        if rows:
+            db.insert_cex_quotes(self.conn, rows)
+            self.last_cex = rows
         return quotes
+
+    # ---- Coinbase (or any CEX) side ---------------------------------------------------
+
+    def _cex_items(self):
+        """RECORD_CEX entries we have a fetcher for, in config order."""
+        return [c for c in getattr(self.cfg, "RECORD_CEX", []) if c["venue"] in self.cex_fetchers]
+
+    def _fetch_one(self, item):
+        start = time.perf_counter()
+        book = self.cex_fetchers[item["venue"]](item["product"])
+        return book, time.perf_counter() - start
+
+    def _start_cex(self):
+        """Start the CEX requests (in the executor if there is one) before the eth_call."""
+        jobs = []
+        for item in self._cex_items():
+            if self.executor is not None:
+                jobs.append((item, self.executor.submit(self._fetch_one, item)))
+            else:
+                jobs.append((item, None))           # fetched in _finish_cex instead
+        return jobs
+
+    def _finish_cex(self, jobs, now, block, quotes):
+        """Collect CEX books into CexQuote rows. A failed or slow request is logged and skipped."""
+        mids = {s.pair: s.mid for s in summarize(quotes)}
+        timeout = getattr(self.cfg, "RECORD_CEX_TIMEOUT_S", 4.0)
+        rows = []
+        for item, future in jobs:
+            try:
+                book, secs = future.result(timeout=timeout) if future else self._fetch_one(item)
+            except Exception as e:       # timeout, HTTP error, bad JSON, unknown product...
+                self.cex_failures += 1
+                self.log(f"recorder: {item['venue']} {item['product']} skipped "
+                         f"({type(e).__name__}: {e})")
+                continue
+            bid, bid_size = book.bids[0] if book.bids else (None, None)
+            ask, ask_size = book.asks[0] if book.asks else (None, None)
+            base_mid = mids.get(item["pair"])
+            edge = None
+            if bid is not None and ask is not None and base_mid:
+                edge = ((bid + ask) / 2 / base_mid - 1) * 100
+            rows.append(CexQuote(now, item["venue"], item["pair"], item["product"], bid, ask,
+                                 bid_size, ask_size, secs, block, edge))
+        return rows

@@ -71,6 +71,26 @@ CREATE TABLE IF NOT EXISTS tri_quotes (
     leg3          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tri_path_ts ON tri_quotes (path, ts);
+-- Coinbase (or other CEX) best bid/ask for a recorder pair, once a minute (recorder.py).
+-- raw_edge = CEX mid / the same minute's best Base mid - 1, in %. size_usd and net_edge
+-- are NULL (top of book only, no costs). block = that minute's Base block, for joins.
+CREATE TABLE IF NOT EXISTS cex_quotes (
+    ts            REAL,
+    strategy      TEXT,
+    venue         TEXT,
+    path          TEXT,
+    size_usd      REAL,
+    raw_edge      REAL,
+    net_edge      REAL,
+    block         INTEGER,
+    product       TEXT,
+    bid           REAL,
+    ask           REAL,
+    bid_size      REAL,
+    ask_size      REAL,
+    fetch_s       REAL
+);
+CREATE INDEX IF NOT EXISTS idx_cex_path_ts ON cex_quotes (path, ts);
 CREATE TABLE IF NOT EXISTS episode_probes (
     ts            REAL,
     strategy      TEXT,
@@ -206,6 +226,17 @@ def insert_pegged(conn, ts, block, quotes, depth_usd=None):
         " VALUES (?,?,?,?,?,?,?,?,?)",
         [(ts, block, q.pair, q.pool, q.bid, q.ask, depth_usd if depth_usd else None,
           q.depth_bid, q.depth_ask) for q in quotes],
+    )
+    conn.commit()
+
+
+def insert_cex_quotes(conn, rows):
+    """rows: [recorder.CexQuote]. One per product per minute."""
+    conn.executemany(
+        "INSERT INTO cex_quotes (ts, strategy, venue, path, size_usd, raw_edge, net_edge, block,"
+        " product, bid, ask, bid_size, ask_size, fetch_s) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(r.ts, "peg_cex", r.venue, r.pair, None, r.raw_edge, None, r.block, r.product,
+          r.bid, r.ask, r.bid_size, r.ask_size, r.fetch_s) for r in rows],
     )
     conn.commit()
 
