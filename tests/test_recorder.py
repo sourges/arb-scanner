@@ -77,7 +77,7 @@ class TestQuotes(unittest.TestCase):
         rec, chain, _ = make_recorder()
         calls_before = chain.calls
         quotes = rec.record(1_000_000.0, REF)
-        self.assertEqual(chain.calls, calls_before + 1)          # ONE eth_call for all pairs
+        self.assertEqual(chain.calls, calls_before + 2)          # one eth_call PER PAIR (2 pairs)
         q = {(x.pair, x.pool): x for x in quotes}
         self.assertEqual(set(q), {("cbBTC/WBTC", "uni-500"), ("cbBTC/WBTC", "aero-ts100"),
                                   ("USDT/USDC", "uni-500")})     # aero USDT pool reverts: left out
@@ -137,10 +137,20 @@ class TestTimingAndFailures(unittest.TestCase):
         self.assertIn("minute skipped (RpcError: rate limited)", lines[-1])
         self.assertEqual(rec.conn.execute("SELECT COUNT(*) FROM pegged_quotes").fetchone(), (0,))
 
-    def test_missing_reference_price_skips_the_minute(self):
+    def test_missing_reference_price_skips_only_that_pair(self):
+        # cbBTC/WBTC needs the BTC price; USDT/USDC doesn't (usd_ref None), so it still records
         rec, _, lines = make_recorder()
+        quotes = rec.record(1_000_000.0, {"ETH": 2000.0})
+        self.assertEqual({q.pair for q in quotes}, {"USDT/USDC"})
+        self.assertIn("recorder: cbBTC/WBTC skipped this minute (KeyError", lines[-1])
+        self.assertEqual((rec.failures, rec.pair_failures), (0, 1))
+
+    def test_every_pair_failing_skips_the_minute(self):
+        rec, _, lines = make_recorder()
+        rec.pairs = [(p, pools) for p, pools in rec.pairs if p["name"] == "cbBTC/WBTC"]
         self.assertEqual(rec.record(1_000_000.0, {"ETH": 2000.0}), [])
-        self.assertIn("KeyError", lines[-1])
+        self.assertIn("minute skipped (KeyError", lines[-1])
+        self.assertEqual(rec.failures, 1)
 
 
 if __name__ == "__main__":

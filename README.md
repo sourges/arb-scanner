@@ -74,6 +74,10 @@ the 2-second scan are unchanged.
   0% maker on these limit-only books. Requests run in parallel with the Base eth_call; one
   failing or slower than `RECORD_CEX_TIMEOUT_S` is logged and skipped, and never costs the
   Base rows. `scanner.py --once` prints them under the pegged table ("vs base bp").
+- **One eth_call per pair** (was one for everything): a single call for all pairs passed the
+  node's gas cap ("out of gas: gas required exceeds: 100000000"), since quotes into near-empty
+  pools burn a lot of gas. The pair calls run in parallel; a pair whose call fails is skipped
+  alone with a log line ("recorder: <pair> skipped this minute ..."), the rest still record.
 
 ## How prices are measured
 
@@ -88,7 +92,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 306 tests ... OK)
+python -m unittest            (expect: Ran 313 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```

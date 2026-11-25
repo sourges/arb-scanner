@@ -91,6 +91,7 @@ class FakeChain:
         self.peg_impact = {}
         self.peg_max_usd = {}
         self.quote_gas = 100_000
+        self.max_subcalls = None     # set to mimic the node's gas cap (see eth_call)
         # pool address -> {"token0", "token1", "fee", "tick_spacing", "factory", "stable"}
         # for find_pool.py; a missing field reverts like a pool that doesn't have that function
         self.pool_info = {}
@@ -111,6 +112,11 @@ class FakeChain:
         assert to.lower() == MULTICALL and data[:4] == SEL["agg"]
         self.calls += 1
         (inner,) = decode(["(address,bool,bytes)[]"], data[4:])
+        # like the node's gas cap: too many sub-calls in one eth_call fails the whole call
+        if self.max_subcalls is not None and len(inner) > self.max_subcalls:
+            from rpc import RpcError
+            raise RpcError("eth_call: {'code': -32003, 'message': 'out of gas: gas required "
+                           "exceeds: 100000000'}")
         out = []
         for target, _allow, cd in inner:
             try:

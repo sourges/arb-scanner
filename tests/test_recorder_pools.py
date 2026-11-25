@@ -88,7 +88,7 @@ class TestClassicPools(unittest.TestCase):
         self.assertNotIn("aeroc-stable", [x.label for _, ps in rec.pairs for x in ps])
         before = chain.calls
         rec.record(1_000_000.0, REF)
-        self.assertEqual(chain.calls, before + 1)
+        self.assertEqual(chain.calls, before + 2)                     # one eth_call per pair
 
     def test_failed_classic_lookup_keeps_v3_pools(self):
         bad = [{"name": "aeroc", "factory": "0x" + "ee" * 20, "stable": [True, False]}]
@@ -103,7 +103,7 @@ class TestDepth(unittest.TestCase):
         chain.peg_impact[(UNI_QUOTER, 500, USDT, USDC)] = 0.001
         before = chain.calls
         q = by_pool(rec.record(1_000_000.0, REF))[("USDT/USDC", "uni-500")]
-        self.assertEqual(chain.calls, before + 1)                     # both sizes, ONE eth_call
+        self.assertEqual(chain.calls, before + 2)                     # both sizes; one call per pair
         self.assertAlmostEqual(q.bid, 0.99980, delta=1e-6)
         self.assertAlmostEqual(q.ask, 1.00020, delta=1e-6)
         self.assertAlmostEqual(q.depth_bid, 0.9989001, delta=1e-6)

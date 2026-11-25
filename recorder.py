@@ -146,37 +146,28 @@ def _price(pair, x_a, y_b, b_out, a_out):
     return bid, ask
 
 
-def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd, depth_usd=None):
-    """pairs: [(pair cfg, [Pool])]. ONE eth_call for everything. Returns (block, [PegQuote]).
-
-    Each pool is quoted both ways at size_usd and, if depth_usd is set, both ways again
-    at depth_usd (4 quotes per pool, still one eth_call). Pools that can't quote either
-    direction at size_usd are left out.
-    """
-    sizes = [size_usd] + ([depth_usd] if depth_usd else [])
+def _quote_one_pair(rpc, cfg, pair, pools, ref_prices, sizes):
+    """ONE eth_call for one pair: (block, [PegQuote]). Raises on an RPC error."""
+    a, b = pair["a"], pair["b"]
+    unit_usd = usd_per_unit(pair, ref_prices)
     calls = [(cfg.MULTICALL3, abi.encode_no_args(abi.SIG_BLOCK_NUMBER))]
-    layout = []   # (pair, pool, [(x_a, y_b, sell index, buy index) per size])
-    for pair, pools in pairs:
-        a, b = pair["a"], pair["b"]
-        unit_usd = usd_per_unit(pair, ref_prices)
-        for p in pools:
-            per_size = []
-            for usd in sizes:
-                x_a = int(usd / unit_usd * 10 ** a["decimals"])   # A to sell
-                y_b = int(usd / unit_usd * 10 ** b["decimals"])   # B to spend
-                calls.append(_quote_call(p, a["address"], b["address"], x_a))
-                calls.append(_quote_call(p, b["address"], a["address"], y_b))
-                per_size.append((x_a, y_b, len(calls) - 2, len(calls) - 1))
-            layout.append((pair, p, per_size))
+    layout = []   # (pool, [(x_a, y_b, sell index, buy index) per size])
+    for p in pools:
+        per_size = []
+        for usd in sizes:
+            x_a = int(usd / unit_usd * 10 ** a["decimals"])   # A to sell
+            y_b = int(usd / unit_usd * 10 ** b["decimals"])   # B to spend
+            calls.append(_quote_call(p, a["address"], b["address"], x_a))
+            calls.append(_quote_call(p, b["address"], a["address"], y_b))
+            per_size.append((x_a, y_b, len(calls) - 2, len(calls) - 1))
+        layout.append((p, per_size))
 
     results = dex.multicall(rpc, cfg.MULTICALL3, calls)
     ok_b, ret_b = results[0]
     if not ok_b:
         raise RuntimeError("multicall could not read block number")
-    block = abi.decode_uint(ret_b)
-
     quotes = []
-    for pair, p, per_size in layout:
+    for p, per_size in layout:
         prices = [_price(pair, x_a, y_b, _amount_out(results[i_sell], p.kind),
                          _amount_out(results[i_buy], p.kind))
                   for x_a, y_b, i_sell, i_buy in per_size]
@@ -185,7 +176,50 @@ def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd, depth_usd=None):
             continue
         depth_bid, depth_ask = prices[1] if len(prices) > 1 else (None, None)
         quotes.append(PegQuote(pair["name"], p.label, bid, ask, depth_bid, depth_ask))
-    return block, quotes
+    return abi.decode_uint(ret_b), quotes
+
+
+def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd, depth_usd=None, executor=None):
+    """pairs: [(pair cfg, [Pool])]. ONE eth_call PER PAIR. Returns (block, [PegQuote], failed).
+
+    Why per pair (Nov 25, 2026): one call for every pair passed the node's gas cap
+    ("out of gas: gas required exceeds: 100000000"), because quotes into near-empty pools
+    burn a lot of gas walking empty price ranges. Per pair, each call stays small, and a
+    pair whose call fails is skipped alone: failed = [(pair name, exception)].
+    With an executor the pair calls run in parallel, so the minute takes no longer.
+    block = the lowest block among the pairs (they're a few blocks apart at most).
+    Each pool is quoted both ways at size_usd and, if depth_usd is set, both ways again
+    at depth_usd (4 quotes per pool). Pools that can't quote either direction at size_usd
+    are left out. Raises the first error only if EVERY pair failed.
+    """
+    sizes = [size_usd] + ([depth_usd] if depth_usd else [])
+    if executor is not None:
+        futures = [(pair, executor.submit(_quote_one_pair, rpc, cfg, pair, pools, ref_prices, sizes))
+                   for pair, pools in pairs]
+        outcomes = []
+        for pair, fut in futures:
+            try:
+                outcomes.append((pair, fut.result(), None))
+            except Exception as e:
+                outcomes.append((pair, None, e))
+    else:
+        outcomes = []
+        for pair, pools in pairs:
+            try:
+                outcomes.append((pair, _quote_one_pair(rpc, cfg, pair, pools, ref_prices, sizes), None))
+            except Exception as e:
+                outcomes.append((pair, None, e))
+
+    blocks, quotes, failed = [], [], []
+    for pair, result, err in outcomes:             # pair order is kept
+        if err is not None:
+            failed.append((pair["name"], err))
+            continue
+        blocks.append(result[0])
+        quotes.extend(result[1])
+    if not blocks and failed:
+        raise failed[0][1]
+    return (min(blocks) if blocks else None), quotes, failed
 
 
 def summarize(quotes):
@@ -276,6 +310,7 @@ class Recorder:
         self.executor = executor                 # runs CEX requests alongside the eth_call
         self.last_cex = []
         self.cex_failures = 0
+        self.pair_failures = 0                   # one pair's call failed, the others recorded
 
     def startup(self):
         cfg = self.cfg
@@ -312,13 +347,17 @@ class Recorder:
         jobs = self._start_cex()
         block, quotes = None, []
         try:
-            block, quotes = quote_pegged(self.rpc, self.cfg, self.pairs, ref_prices,
-                                         self.cfg.RECORD_SIZE_USD, self.depth_usd)
-        except Exception as e:      # RPC error, missing reference price, bad reply...
+            block, quotes, failed = quote_pegged(self.rpc, self.cfg, self.pairs, ref_prices,
+                                                 self.cfg.RECORD_SIZE_USD, self.depth_usd,
+                                                 self.executor)
+        except Exception as e:      # every pair failed: RPC down, missing prices, bad replies...
             self.failures += 1
             self.log(f"recorder: minute skipped ({type(e).__name__}: {e})")
             quotes = []
         else:
+            for name, e in failed:  # some pairs failed: the rest are still recorded
+                self.pair_failures += 1
+                self.log(f"recorder: {name} skipped this minute ({type(e).__name__}: {e})")
             db.insert_pegged(self.conn, now, block, quotes, self.depth_usd)
             self.last_quotes = quotes
         rows = self._finish_cex(jobs, now, block, quotes)
