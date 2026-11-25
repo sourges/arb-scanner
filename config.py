@@ -185,7 +185,7 @@ DAI = {"address": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", "symbol": "DAI",
 # Staked ETH (added Nov 18, 2026). Both earn staking rewards, so their price in WETH sits
 # ABOVE 1.0 and creeps up over time (mid shows as roughly +1,000 bp or more). stat-arb
 # measures the spread against that rising line. Sizes use the ETH price, so "$100" of
-# cbETH/wstETH is really a little more (one is worth more than 1 ETH); price ratios are unaffected.
+# cbETH is really a little more (one is worth more than 1 ETH); price ratios are unaffected.
 # Addresses: cbETH and Lido's wstETH on Base (Coinbase / Lido bridged tokens).
 CBETH = {"address": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22", "symbol": "cbETH", "decimals": 18}
 WSTETH = {"address": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452", "symbol": "wstETH", "decimals": 18}
@@ -197,9 +197,8 @@ RECORD_PAIRS = [
     {"name": "DAI/USDC",   "a": DAI,   "b": USDC, "usd_ref": None},
     {"name": "cbETH/WETH",  "a": CBETH,  "b": WETH, "usd_ref": "ETH"},
     {"name": "wstETH/WETH", "a": WSTETH, "b": WETH, "usd_ref": "ETH"},
-    # Added Nov 25, 2026: is there a DIRECT cbETH/wstETH pool? Going through WETH costs two
-    # swaps per leg (~2.3 bp round trip), which ate the stat-arb signal (~1-2 bp per trade).
-    {"name": "cbETH/wstETH", "a": CBETH, "b": WSTETH, "usd_ref": "ETH"},
+    # cbETH/wstETH (direct pool) was recorded Nov 25, 2026 and dropped the same day: its only
+    # pool (univ3-500) costs ~20 bp round trip at $100 and is empty at $1,000. Useless.
 ]
 
 # Coinbase books for the same pegged pairs, recorded in the SAME minute as the Base quotes
@@ -212,6 +211,10 @@ RECORD_CEX = [
     {"pair": "USDT/USDC",  "venue": "coinbase", "product": "USDT-USDC"},
 ]
 RECORD_CEX_TIMEOUT_S = 4.0     # a slow Coinbase reply is dropped for that minute
+
+# A pool the node refuses as too heavy even on its own ("out of gas") is skipped for this
+# many minutes, then tried again. Groups that are merely too big are split automatically.
+RECORD_RECHECK_MIN = 60
 
 # Aerodrome classic (v2-style) pools, for the RECORDER ONLY: the 2-second scan, triangle
 # and size probes use DEXES below and never see these. One stable pool and one volatile

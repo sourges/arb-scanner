@@ -174,7 +174,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual([c["product"] for c in config.RECORD_CEX], ["CBETH-ETH", "USDT-USDC"])
         for c in config.RECORD_CEX:
             self.assertIn(c["pair"], names)
-        self.assertIn("cbETH/wstETH", names)
+        self.assertNotIn("cbETH/wstETH", names)                       # dropped Nov 25, 2026
 
 
 class TestOldDatabase(unittest.TestCase):

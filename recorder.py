@@ -179,18 +179,25 @@ def _quote_one_pair(rpc, cfg, pair, pools, ref_prices, sizes):
     return abi.decode_uint(ret_b), quotes
 
 
-def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd, depth_usd=None, executor=None):
-    """pairs: [(pair cfg, [Pool])]. ONE eth_call PER PAIR. Returns (block, [PegQuote], failed).
+def is_gas_error(err):
+    """True for the node refusing a call as too heavy ("out of gas: gas required exceeds ...")."""
+    text = str(err).lower()
+    return "out of gas" in text or "gas required exceeds" in text
 
-    Why per pair (Nov 25, 2026): one call for every pair passed the node's gas cap
-    ("out of gas: gas required exceeds: 100000000"), because quotes into near-empty pools
-    burn a lot of gas walking empty price ranges. Per pair, each call stays small, and a
-    pair whose call fails is skipped alone: failed = [(pair name, exception)].
-    With an executor the pair calls run in parallel, so the minute takes no longer.
-    block = the lowest block among the pairs (they're a few blocks apart at most).
+
+def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd, depth_usd=None, executor=None):
+    """pairs: [(pair cfg, [Pool])], one entry per eth_call (a pair can appear more than once,
+    each time with a different group of its pools). Returns (block, [PegQuote], failed) with
+    failed = [(index into pairs, pair name, exception)]. Never raises.
+
+    Why not one call for everything (Nov 25, 2026): it passed the node's gas cap ("out of gas:
+    gas required exceeds: 100000000"), because quotes into near-empty pools burn a lot of gas
+    walking empty price ranges. Recorder.record splits heavy groups further as needed.
+    With an executor the calls run in parallel, so the minute takes no longer.
+    block = the lowest block among the calls (they're a few blocks apart at most), or None.
     Each pool is quoted both ways at size_usd and, if depth_usd is set, both ways again
     at depth_usd (4 quotes per pool). Pools that can't quote either direction at size_usd
-    are left out. Raises the first error only if EVERY pair failed.
+    are left out.
     """
     sizes = [size_usd] + ([depth_usd] if depth_usd else [])
     if executor is not None:
@@ -211,14 +218,12 @@ def quote_pegged(rpc, cfg, pairs, ref_prices, size_usd, depth_usd=None, executor
                 outcomes.append((pair, None, e))
 
     blocks, quotes, failed = [], [], []
-    for pair, result, err in outcomes:             # pair order is kept
+    for i, (pair, result, err) in enumerate(outcomes):    # call order is kept
         if err is not None:
-            failed.append((pair["name"], err))
+            failed.append((i, pair["name"], err))
             continue
         blocks.append(result[0])
         quotes.extend(result[1])
-    if not blocks and failed:
-        raise failed[0][1]
     return (min(blocks) if blocks else None), quotes, failed
 
 
@@ -311,6 +316,12 @@ class Recorder:
         self.last_cex = []
         self.cex_failures = 0
         self.pair_failures = 0                   # one pair's call failed, the others recorded
+        # Call groups, learned as we go: pair name -> [[Pool, ...], ...], one eth_call per
+        # group. Starts as one group per pair; a group the node refuses as too heavy is
+        # split in half (and remembered). A single pool that's too heavy even alone is
+        # parked: pool key -> (pair name, Pool, minute to try it again).
+        self.groups = {}
+        self.parked = {}
 
     def startup(self):
         cfg = self.cfg
@@ -335,6 +346,7 @@ class Recorder:
                 self.log(f"recorder: skipping {pair['name']}: no pools found")
                 continue
             self.pairs.append((pair, pools))
+            self.groups[pair["name"]] = [list(pools)]
             self.log(f"recorder {pair['name']} pools: " + ", ".join(p.label for p in pools))
 
     def due(self, now):
@@ -347,24 +359,75 @@ class Recorder:
         jobs = self._start_cex()
         block, quotes = None, []
         try:
-            block, quotes, failed = quote_pegged(self.rpc, self.cfg, self.pairs, ref_prices,
-                                                 self.cfg.RECORD_SIZE_USD, self.depth_usd,
-                                                 self.executor)
-        except Exception as e:      # every pair failed: RPC down, missing prices, bad replies...
-            self.failures += 1
-            self.log(f"recorder: minute skipped ({type(e).__name__}: {e})")
-            quotes = []
-        else:
-            for name, e in failed:  # some pairs failed: the rest are still recorded
+            block, quotes, errors = self._quote_groups(ref_prices)
+        except Exception as e:      # a bug in the grouping itself: never stop the scanner
+            errors = [("recorder", e)]
+        if quotes:
+            for name, e in errors:  # some pairs failed: the rest are still recorded
                 self.pair_failures += 1
                 self.log(f"recorder: {name} skipped this minute ({type(e).__name__}: {e})")
             db.insert_pegged(self.conn, now, block, quotes, self.depth_usd)
             self.last_quotes = quotes
+        elif errors:                # every pair failed: RPC down, missing prices, bad replies...
+            self.failures += 1
+            e = errors[0][1]
+            self.log(f"recorder: minute skipped ({type(e).__name__}: {e})")
         rows = self._finish_cex(jobs, now, block, quotes)
         if rows:
             db.insert_cex_quotes(self.conn, rows)
             self.last_cex = rows
         return quotes
+
+    # ---- call groups: stay under the node's gas cap -----------------------------------
+
+    def _quote_groups(self, ref_prices):
+        """Quote every group; split groups the node refuses as too heavy and retry them in the
+        same minute. Returns (block, quotes, [(pair name, error)] for non-gas failures)."""
+        minute = self.last_minute
+        recheck = getattr(self.cfg, "RECORD_RECHECK_MIN", 60)
+        for key, (name, pool, until) in list(self.parked.items()):   # parked pools come back
+            if minute >= until:
+                self.groups.setdefault(name, []).append([pool])
+                del self.parked[key]
+        by_name = {p["name"]: p for p, _ in self.pairs}
+        units = [(by_name[n], g) for n in by_name for g in self.groups.get(n, []) if g]
+        blocks, quotes, errors, gas = [], [], [], None
+        for _ in range(16):                       # pools per group at least halve each pass
+            if not units:
+                break
+            block, got, failed = quote_pegged(self.rpc, self.cfg, units, ref_prices,
+                                              self.cfg.RECORD_SIZE_USD, self.depth_usd,
+                                              self.executor)
+            if block is not None:
+                blocks.append(block)
+            quotes.extend(got)
+            retry = []
+            for i, name, err in failed:
+                pair, group = units[i]
+                if not is_gas_error(err):
+                    if name not in [n for n, _ in errors]:
+                        errors.append((name, err))
+                    continue
+                gas = gas or (name, err)
+                groups = self.groups[name]
+                at = next(k for k, g in enumerate(groups) if g is group)
+                if len(group) > 1:
+                    half = len(group) // 2
+                    a, b = group[:half], group[half:]
+                    groups[at:at + 1] = [a, b]
+                    retry += [(pair, a), (pair, b)]
+                    self.log(f"recorder: {name} too heavy for one call: now {len(groups)} calls")
+                else:
+                    (pool,) = group
+                    del groups[at]
+                    self.parked[(name, pool.label)] = (name, pool, minute + recheck)
+                    self.log(f"recorder: {name} {pool.label} too heavy even alone: "
+                             f"skipped for {recheck} min")
+            units = retry
+        if not quotes and not errors and gas:     # everything too heavy: the minute is skipped
+            errors.append(gas)
+        quotes.sort(key=lambda q: list(by_name).index(q.pair))   # pair order, like before
+        return (min(blocks) if blocks else None), quotes, errors
 
     # ---- Coinbase (or any CEX) side ---------------------------------------------------
 

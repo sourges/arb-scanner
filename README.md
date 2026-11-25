@@ -66,7 +66,9 @@ the 2-second scan are unchanged.
 
 **Added Nov 25, 2026:**
 - **cbETH/wstETH** pair: does a *direct* pool exist? Going cbETH -> WETH -> wstETH costs two swaps
-  per leg (~2.3 bp round trip), which ate the stat-arb signal.
+  per leg (~2.3 bp round trip), which ate the stat-arb signal. **Dropped the same day:** the only
+  direct pool (univ3-500) costs ~20 bp round trip at $100 and is empty at $1,000. Its few rows
+  in pegged_quotes are from Nov 25 only.
 - **Coinbase quotes** (`RECORD_CEX`): in the same minute, Coinbase's best bid/ask for **CBETH-ETH**
   and **USDT-USDC** go in the **cex_quotes** table (shared columns ts, strategy='peg_cex',
   venue='coinbase', path=pair, raw_edge, then block, product, bid, ask, bid_size, ask_size,
@@ -78,6 +80,12 @@ the 2-second scan are unchanged.
   node's gas cap ("out of gas: gas required exceeds: 100000000"), since quotes into near-empty
   pools burn a lot of gas. The pair calls run in parallel; a pair whose call fails is skipped
   alone with a log line ("recorder: <pair> skipped this minute ..."), the rest still record.
+- **Adaptive split** (same day, after Ankr kept getting benched for out-of-gas): if the node
+  refuses a pair's call as too heavy, the recorder splits that pair's pools in half and retries
+  in the same minute, down to one pool per call, and remembers the split (log line once:
+  "recorder: <pair> too heavy for one call: now N calls"). A pool too heavy even alone is
+  skipped for `RECORD_RECHECK_MIN` (60) minutes, then tried again ("... too heavy even alone").
+  Such pools are near-empty and never set the price. Splits reset when the scanner restarts.
 
 ## How prices are measured
 
@@ -92,7 +100,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 313 tests ... OK)
+python -m unittest            (expect: Ran 320 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
