@@ -23,6 +23,18 @@ comes from the same block and compares fairly.
 Rows go in episode_probes, one per size, using the shared columns
 (ts, strategy, venue, path, size_usd, raw_edge, net_edge) like tri_quotes.
 A probe that fails is logged and skipped; it never stops the scanner.
+
+Blocks (Nov 27, 2026): `block` is the scan that triggered the probe, `probe_block` is
+the block the probe itself was quoted at (read in the same eth_call). Gas still uses
+the triggering scan's base fee and L1 fee: a block later they differ by a fraction of
+a cent at these sizes.
+
+When to probe (Nov 27, 2026): the first scan of an episode at or above
+PROBE_MIN_NET_PCT, whether that is the scan it opened on or a later one (an episode
+that opens at +0.01% and climbs to +0.3% is probed when it crosses). Each episode is
+probed at most once. A probe refused by the hourly cap is tried again on the next scan
+while the episode stays above the threshold, and the first refusal per episode is
+stored in probe_skips so the report can count what the cap hid.
 """
 from __future__ import annotations
 
@@ -44,6 +56,7 @@ class ProbeResult:
     base_amount: float | None    # ETH/BTC bought (None = buy couldn't fill)
     usd_back: float | None       # USDC from selling it (None = couldn't fill)
     gas_usd: float
+    probe_block: int | None = None   # block the probe was quoted at
 
     @property
     def path(self) -> str:
@@ -95,7 +108,9 @@ def quote_sizes(rpc, cfg, pair, buy_pool, sell_pool, sizes, ref_price, basefee_w
     """Price the buy_pool -> sell_pool round trip at every size in one eth_call.
     quote_usd: USD value of one quote token; usd_back is converted to USD."""
     calls, x_raws = build_calls(cfg, pair, buy_pool, sell_pool, sizes, ref_price, quote_usd)
+    calls.append((cfg.MULTICALL3, abi.encode_no_args(abi.SIG_BLOCK_NUMBER)))
     results = dex.multicall(rpc, cfg.MULTICALL3, calls)
+    probe_block = read_block(results.pop())
     base_dec, usdc_dec = pair["base"]["decimals"], dex.pair_quote(cfg, pair)["decimals"]
 
     def gas(units):
@@ -112,8 +127,14 @@ def quote_sizes(rpc, cfg, pair, buy_pool, sell_pool, sizes, ref_price, basefee_w
             usd_back = sell_out / 10 ** usdc_dec * (buy_out / x_raws[i]) * quote_usd
         gas_usd = (gas(buy_gas) if buy_gas else 0.0) + (gas(sell_gas) if sell_gas else 0.0)
         out.append(ProbeResult(pair["name"], buy_pool.label, sell_pool.label, size,
-                               base_amount, usd_back, gas_usd))
+                               base_amount, usd_back, gas_usd, probe_block))
     return out
+
+
+def read_block(ok_ret):
+    """Block number from a Multicall3 getBlockNumber() result, or None."""
+    ok, ret = ok_ret
+    return abi.decode_uint(ret) if ok and len(ret) >= 32 else None
 
 
 def fmt_size(size):
@@ -159,13 +180,32 @@ class Prober:
         self.min_pct = getattr(cfg, "PROBE_MIN_NET_PCT", 0.05)
         self.routes = tuple(getattr(cfg, "PROBE_ROUTES", ("dex>dex",)))
         self.cap = HourlyCap(getattr(cfg, "PROBE_MAX_PER_HOUR", 60))   # dex>dex probes only
+        self.probed = {}      # (pair, route) -> start_ts of the episode already probed
+        self.noted = {}       # (pair, route) -> start_ts of the episode whose refusal is stored
+        self.pending = {}     # (pair, route) -> start_ts of the episode openings() picked
 
-    def openings(self, results, already_open):
-        """Route results that START an episode this round and are big enough to probe."""
+    def openings(self, results, open_eps):
+        """Routes at or above the threshold whose current episode hasn't been probed yet.
+
+        Call it AFTER the tracker has updated, with tracker.open, so this scan's new
+        episodes are in open_eps. That covers an episode that opens big AND one that
+        opens small and crosses the threshold later. A route not in open_eps (no tracker)
+        counts as a new episode."""
         if not self.sizes:
             return []
-        return [r for k, r in results.items()
-                if k[1] in self.routes and k not in already_open and r.net_pct >= self.min_pct]
+        out = []
+        for k, r in results.items():
+            if k[1] not in self.routes or r.net_pct < self.min_pct:
+                continue
+            ep_id = getattr(open_eps.get(k), "start_ts", None)
+            if k in self.probed and self.probed[k] == ep_id:
+                continue                     # this episode was already probed
+            self.pending[k] = ep_id
+            out.append(r)
+        for d in (self.probed, self.noted):   # forget episodes that have closed
+            for k in [k for k in d if k not in open_eps and k not in self.pending]:
+                del d[k]
+        return out
 
     @property
     def skipped(self):
@@ -182,8 +222,16 @@ class Prober:
         quote_usd = quote_usd or {}
         done = {}
         for r in opening:
+            k = (r.pair, r.key)
+            ep_id = self.pending.pop(k, None)
             if not self.allow(now):
+                # not marked probed, so it is tried again next scan if still above the
+                # threshold; the first refusal per episode is stored for the report
+                if k not in self.noted or self.noted[k] != ep_id:
+                    self.noted[k] = ep_id
+                    self._note_skip(now, block, r)
                 continue
+            self.probed[k] = ep_id
             try:
                 pair, pools = pair_pools[r.pair]
                 by_label = {p.label: p for p in pools}
@@ -191,10 +239,20 @@ class Prober:
                 results = quote_sizes(self.rpc, self.cfg, pair, buy_pool, sell_pool, self.sizes,
                                       ref_prices[r.pair], basefee_wei, l1_fee_wei, ref_prices["ETH"],
                                       quote_usd.get(r.pair, 1.0))
-                db.insert_probes(self.conn, now, block, r.key, results)
+                # ts = the episode's start, so the probe joins its episode even when it ran
+                # at a later crossing; probe_block says when it actually ran
+                db.insert_probes(self.conn, ep_id if ep_id is not None else now, block, r.key, results)
                 self.log(probe_line(results))
                 done[results[0].path] = results
             except Exception as e:      # a failed probe is skipped, never fatal
                 self.log(f"probe failed for {r.pair} {r.buy_venue}>{r.sell_venue} "
                          f"({type(e).__name__}: {e})")
+        self.pending.clear()
         return done
+
+    def _note_skip(self, now, block, r):
+        try:
+            db.insert_probe_skip(self.conn, now, block, "dex_arb_probe",
+                                 f"{r.pair} {r.buy_venue}>{r.sell_venue}", r.size_usd, r.net_pct)
+        except Exception as e:          # bookkeeping only, never fatal
+            self.log(f"probe skip not stored ({type(e).__name__}: {e})")

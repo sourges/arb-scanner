@@ -62,6 +62,21 @@ class TestDb(unittest.TestCase):
         conn.close()
         db.connect(self.path).close()          # connecting again must not try to re-add columns
 
+    def test_adds_probe_block_to_old_probe_tables(self):
+        old = sqlite3.connect(self.path)
+        old.execute("CREATE TABLE episode_probes (ts REAL, block INTEGER, size_usd REAL)")
+        old.execute("CREATE TABLE tri_probes (ts REAL, block INTEGER, size_usd REAL)")
+        old.execute("INSERT INTO episode_probes VALUES (1.0, 7, 100.0)")
+        old.commit()
+        old.close()
+        conn = db.connect(self.path)
+        for table in ("episode_probes", "tri_probes"):
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            self.assertIn("probe_block", cols)
+        self.assertEqual(conn.execute("SELECT block, probe_block FROM episode_probes").fetchone(), (7, None))
+        conn.close()
+        db.connect(self.path).close()          # again: no second ALTER
+
     def test_file_database_uses_wal(self):
         conn = db.connect(self.path)
         self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")

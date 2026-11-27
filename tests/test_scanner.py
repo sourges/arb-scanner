@@ -21,8 +21,8 @@ class Clock:
         return self.t
 
 
-def make_scanner():
-    cfg = make_config()
+def make_scanner(**cfg_over):
+    cfg = make_config(**cfg_over)
     chain = FakeChain()
     clock = Clock()
     mids = {("kraken", "ETHUSD"): 2000.0, ("kraken", "XBTUSD"): 60000.0,
@@ -279,6 +279,47 @@ class TestSizeProbes(unittest.TestCase):
         self.assertEqual({p[0] for p in probes}, {start})            # joins on start_ts
         self.assertIn("PROBE ETH uni-500>aero-ts100:", out.getvalue())
         s.shutdown()
+
+    def test_episode_that_opens_small_is_probed_when_it_crosses(self):
+        """Opens at about +0.019% (aero 0.13% above uni: (0.9995^2 * 1.0013 - 1) - 0.0106% gas),
+        under the 0.05% threshold; the next scan it grows to +0.89% and is probed then.
+        The probe joins the episode's start, and the episode isn't probed twice."""
+        s, chain, clock, _ = make_scanner()
+        chain.prices[(AERO_QUOTER, 100, WETH)] = (2000.0 * 1.0013, 0.0005)
+        chain.block, clock.t = 101, clock.t + 2
+        with redirect_stdout(io.StringIO()):
+            s.step()
+            self.assertEqual(s.conn.execute("SELECT COUNT(*) FROM episode_probes").fetchone(), (0,))
+            chain.prices[(AERO_QUOTER, 100, WETH)] = (2020.0, 0.0005)
+            chain.block, clock.t = 102, clock.t + 2
+            s.step()
+            chain.block, clock.t = 103, clock.t + 2
+            s.step()
+            chain.prices[(AERO_QUOTER, 100, WETH)] = (2000.0, 0.0005)
+            chain.block, clock.t = 104, clock.t + 2
+            s.step()
+        probes = s.conn.execute("SELECT DISTINCT ts FROM episode_probes").fetchall()
+        (start, samples) = s.conn.execute(
+            "SELECT start_ts, samples FROM episodes WHERE route='dex>dex' AND pair='ETH'").fetchone()
+        self.assertEqual(samples, 3)                     # one episode: small, big, big
+        self.assertEqual(probes, [(start,)])             # probed once, joined to its start
+        s.shutdown()
+
+    def test_gap_in_samples_splits_the_episode(self):
+        """Two positive scans 10s apart (> EPISODE_MAX_GAP_S = 6) are two episodes."""
+        s, chain, clock, _ = make_scanner(EPISODE_MAX_GAP_S=6.0)
+        chain.prices[(AERO_QUOTER, 100, WETH)] = (2020.0, 0.0005)
+        with redirect_stdout(io.StringIO()):
+            chain.block, clock.t = 101, clock.t + 2
+            s.step()
+            chain.block, clock.t = 102, clock.t + 10                 # scans missed in between
+            s.step()
+            chain.block, clock.t = 103, clock.t + 2
+            s.step()
+        s.shutdown()
+        rows = s.conn.execute("SELECT samples, seconds FROM episodes WHERE route='dex>dex'"
+                              " AND pair='ETH' ORDER BY start_ts").fetchall()
+        self.assertEqual(rows, [(1, 0.0), (2, 2.0)])
 
     def test_quiet_market_makes_no_probes(self):
         s, chain, clock, _ = make_scanner()

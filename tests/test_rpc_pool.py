@@ -12,8 +12,8 @@ from types import SimpleNamespace
 
 import db
 import scanner as scanner_mod
-from rpc import (BASE_CHAIN_ID, RpcClient, RpcError, RpcPool, RpcRateLimited, check_providers,
-                 provider_name)
+from rpc import (BASE_CHAIN_ID, RpcCallError, RpcClient, RpcError, RpcPool, RpcRateLimited,
+                 check_providers, provider_name)
 from scanner import Scanner, build_rpc, status_line
 from tests.fakes import FakeChain, FakeFetchers, make_config
 from tests.test_rpc import Resp, Session
@@ -188,6 +188,62 @@ class TestFailover(unittest.TestCase):
         with self.assertRaisesRegex(RpcError, "b down"):
             p.eth_call("0x0", b"")
         self.assertEqual(a.calls, 1)                                # benched one left alone
+
+
+class TestCallErrors(unittest.TestCase):
+    """Nov 27, 2026: out of gas / reverted are the call's fault, not the provider's."""
+
+    def gas_err(self):
+        return RpcCallError("eth_call: {'code': -32003, 'message': 'out of gas: gas required exceeds: 550000000'}")
+
+    def test_not_retried_on_the_other_provider(self):
+        p, a, b, lines, _ = pool()
+        p.rotate()
+        a.fail = [self.gas_err()]
+        with self.assertRaises(RpcCallError):
+            p.eth_call("0x0", b"")
+        self.assertEqual((a.calls, b.calls), (1, 0))
+
+    def test_never_benches_and_counts_as_answered(self):
+        p, a, b, lines, _ = pool()
+        p.rotate()
+        a.fail = [self.gas_err()] * 5
+        for _ in range(5):
+            with self.assertRaises(RpcCallError):
+                p.eth_call("0x0", b"")
+        self.assertEqual(lines, [])
+        self.assertEqual((p.slots[0].errors, p.slots[0].benched_until, p.slots[0].calls), (0, 0.0, 5))
+        self.assertEqual(p.rotate(), "ankr")
+        self.assertEqual(p.rotate(), "alchemy")                     # still in the rotation
+
+    def test_resets_a_run_of_real_failures(self):
+        p, a, *_ = pool()
+        p.rotate()
+        a.fail = [RpcError("HTTP 503"), RpcError("HTTP 503"), self.gas_err(), RpcError("HTTP 503")]
+        for _ in range(4):
+            try:
+                p.eth_call("0x0", b"")
+            except RpcError:
+                pass
+        self.assertEqual(p.slots[0].benched_until, 0.0)             # 2, answer, 1: not 3 in a row
+
+    def test_recorder_still_sees_a_gas_error(self):
+        import recorder
+        self.assertTrue(recorder.is_gas_error(self.gas_err()))
+
+    def test_client_classifies_json_errors(self):
+        out_of_gas = {"error": {"code": -32003, "message": "out of gas: gas required exceeds: 1"}}
+        reverted = {"error": {"code": 3, "message": "execution reverted"}}
+        limited = {"error": {"code": -32005, "message": "daily request limit exceeded"}}
+        for payload in (out_of_gas, reverted):
+            c = RpcClient("http://x", session=Session(Resp(payload=payload)))
+            with self.assertRaises(RpcCallError):
+                c.call("eth_call", [])
+        c = RpcClient("http://x", session=Session(Resp(payload=limited)))
+        with self.assertRaises(RpcError) as cm:
+            c.call("eth_call", [])
+        self.assertNotIsInstance(cm.exception, RpcCallError)        # a provider problem: counts
+        self.assertTrue(issubclass(RpcCallError, RpcError))         # scanner still retries the round
 
 
 class TestRpcClient(unittest.TestCase):

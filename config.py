@@ -25,6 +25,9 @@ POLL_SECONDS = 2.0          # one scan every 2s. Base makes a block about every 
                             # sees roughly every 10th block; faster polling uses more RPC credits
 BOOK_MAX_AGE_S = 6.0        # ignore a CEX order book older than this
 DB_PATH = "arb_scanner.sqlite"
+# An episode whose last positive sample is older than this is closed instead of being
+# stretched across skipped or failed scans (Nov 27, 2026). 3 polls.
+EPISODE_MAX_GAP_S = 6.0
 
 # ---- trade size ---------------------------------------------------------------
 TRADE_SIZE_USD = 100.0

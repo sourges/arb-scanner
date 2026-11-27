@@ -181,6 +181,22 @@ class TestProbeReport(unittest.TestCase):
         self.assertIn("ETH a>b", out)
         self.assertIn("can't fill", out)
 
+    def test_cap_refusals_counted(self):
+        db.insert_probe_skip(self.conn, 2500.0, 5, "dex_arb_probe", "ETH a>b", 100.0, 0.30)
+        db.insert_probe_skip(self.conn, 2600.0, 6, "dex_arb_probe", "BTC c>d", 100.0, 0.45)
+        db.insert_probe_skip(self.conn, 2700.0, 7, "tri_arb_probe", "USDC>WETH>cbBTC>USDC", 100.0, 0.05)
+        db.insert_probe_skip(self.conn, 100.0, 1, "dex_arb_probe", "old", 100.0, 9.0)   # before window
+        n, best = report.skip_count(self.conn, 1000.0, "dex_arb_probe")
+        self.assertEqual(n, 2)
+        self.assertAlmostEqual(best, 0.45)
+        buf = io.StringIO()
+        with mock.patch.object(report.config, "DB_PATH", self.path), redirect_stdout(buf):
+            report.main([])
+        self.assertIn("hourly cap refused", buf.getvalue())
+
+    def test_no_skip_line_without_refusals(self):
+        self.assertEqual(report.skip_count(self.conn, 0, "dex_arb_probe"), (0, None))
+
     def test_database_without_probe_table(self):
         old = os.path.join(self.tmp.name, "old.sqlite")
         c = sqlite3.connect(old)

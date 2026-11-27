@@ -249,6 +249,62 @@ class TestEachRound(ExtraBase):
         self.assertNotIn("SOL best", line)
 
 
+class TestPriceSnapshot(ExtraBase):
+    """Bug fixed Nov 27, 2026: pools were SIZED with the previous scan's quote-token price
+    but VALUED with this scan's, so the quote token's ~2s move showed up as fake edge.
+
+    Hand-worked: VIRT/ETH pools are both at 0.0005 WETH per VIRT, so the true dex>dex gap
+    is the same every scan (two 0.05% fees and gas: about -0.11%). Kraken ETH moves from
+    $2,000 to $2,006 (+0.3%) between scans; the pools don't move.
+        buggy: spend 100/2000 = 0.05 WETH, value what comes back at $2,006
+               -> usd_back * 2006/2000 -> net about +0.3% better than it should be
+        fixed: value it at the $2,000 it was sized with -> net unchanged
+    ("Unchanged" to 0.001%: gas is still converted at the new ETH price, which moves the
+    ~$0.0106 gas by 0.5% = $0.00005, i.e. 0.00005% of $100.)
+    Same for ETH/BTC (quoted in cbBTC) when Kraken BTC moves."""
+
+    def mids(self):
+        return {("kraken", "ETHUSD"): 2000.0, ("kraken", "XBTUSD"): 60000.0,
+                ("coinbase", "ETH-USD"): 2000.0, ("coinbase", "BTC-USD"): 60000.0,
+                ("kraken", "SOLUSD"): 150.0, ("coinbase", "SOL-USD"): 150.0}
+
+    def net_after_move(self, pair, moves):
+        m = self.mids()
+        s, chain, clock, _ = self.scanner(mids=m)
+        before = self.step(s, chain, clock)[1][(pair, "dex>dex")]
+        for k, v in moves.items():
+            m[k] = v
+        after = self.step(s, chain, clock)[1][(pair, "dex>dex")]
+        return before, after
+
+    def test_eth_move_adds_no_fake_edge_on_weth_quoted_pair(self):
+        up = {("kraken", "ETHUSD"): 2006.0, ("coinbase", "ETH-USD"): 2006.0}
+        before, after = self.net_after_move("VIRT/ETH", up)
+        self.assertAlmostEqual(before.net_pct, (0.9995 ** 2 - 1) * 100, delta=0.02)
+        self.assertAlmostEqual(after.net_pct, before.net_pct, delta=0.001)     # was +0.3 higher
+
+    def test_eth_drop_adds_no_fake_loss(self):
+        down = {("kraken", "ETHUSD"): 1990.0, ("coinbase", "ETH-USD"): 1990.0}
+        before, after = self.net_after_move("VIRT/ETH", down)
+        self.assertAlmostEqual(after.net_pct, before.net_pct, delta=0.001)     # was -0.5 lower
+
+    def test_btc_move_adds_no_fake_edge_on_eth_btc(self):
+        up = {("kraken", "XBTUSD"): 60300.0, ("coinbase", "BTC-USD"): 60300.0}
+        before, after = self.net_after_move("ETH/BTC", up)
+        self.assertAlmostEqual(after.net_pct, before.net_pct, delta=0.001)     # was +0.5 higher
+
+    def test_next_scan_uses_the_new_price(self):
+        """The new price isn't lost: the scan after the move sizes and values with it."""
+        m = self.mids()
+        s, chain, clock, _ = self.scanner(mids=m)
+        self.step(s, chain, clock)
+        m[("kraken", "ETHUSD")] = m[("coinbase", "ETH-USD")] = 2006.0
+        self.step(s, chain, clock)
+        r = self.step(s, chain, clock)[1][("VIRT/ETH", "dex>dex")]
+        self.assertAlmostEqual(r.usd_back / r.size_usd, 0.9995 ** 2, places=5)
+        self.assertAlmostEqual(s.quote_usds()["VIRT/ETH"], 2006.0)
+
+
 class TestHelpers(unittest.TestCase):
     def test_token_problem(self):
         tok = {"address": "0xabc", "symbol": "SOL", "decimals": None}

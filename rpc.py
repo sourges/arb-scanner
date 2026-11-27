@@ -10,7 +10,9 @@ neither runs out of its free monthly quota:
     weighted rotation (RPC_WEIGHTS). Every call in that scan goes to that provider,
     so one scan's quotes, probes and recorder rows all come from the same node.
   - Failover: a failed call is tried once on the next healthy provider, so a bad
-    reply from one doesn't cost the round. A provider that rate-limits (HTTP 429)
+    reply from one doesn't cost the round. A call that fails on its own merits (out of
+    gas, execution reverted: RpcCallError) is not retried and not counted against
+    the provider, since every node would answer the same. A provider that rate-limits (HTTP 429)
     or fails fail_limit calls in a row is benched for bench_s seconds and skipped
     by the rotation, then tried again. If every provider is benched, the one whose
     bench ends first is used anyway (the scanner never stalls on its own).
@@ -33,6 +35,21 @@ class RpcError(Exception):
 
 class RpcRateLimited(RpcError):
     """HTTP 429: the provider wants us to slow down. Benches it at once in RpcPool."""
+
+
+class RpcCallError(RpcError):
+    """The node ran the call and it failed on its own merits (out of gas, reverted).
+    Any provider would give the same answer, so RpcPool neither retries it elsewhere
+    nor counts it against the provider (Nov 27, 2026). The message is unchanged, so
+    recorder.is_gas_error() still reads it."""
+
+
+# JSON-RPC error messages that mean "this call can't succeed", not "this node is unwell".
+CALL_ERROR_MARKERS = ("out of gas", "gas required exceeds", "execution reverted")
+
+
+def is_call_error(error) -> bool:
+    return any(m in str(error).lower() for m in CALL_ERROR_MARKERS)
 
 
 class RpcClient:
@@ -59,7 +76,8 @@ class RpcClient:
         if not isinstance(data, dict):
             raise RpcError(f"{method}: unexpected reply: {str(data)[:200]}")
         if data.get("error"):
-            raise RpcError(f"{method}: {data['error']}")
+            err = RpcCallError if is_call_error(data["error"]) else RpcError
+            raise err(f"{method}: {data['error']}")
         if "result" not in data:
             raise RpcError(f"{method}: reply has no result: {str(data)[:200]}")
         return data["result"]
@@ -190,6 +208,9 @@ class RpcPool:
             tried.add(i)
             try:
                 out = fn(self.slots[i].client)
+            except RpcCallError:
+                self._ok(i)               # the provider answered; the call itself can't work
+                raise
             except RpcError as e:
                 self._failed(i, e)
                 with self.lock:

@@ -240,6 +240,22 @@ def print_probe_table(conn, since, top, table, path_label, path_width):
         print(f"{start:<16}{path:<{path_width}}" + "".join(f"{fmt_pct(by_size[z]) if z in by_size else '-':>12}" for z in all_sizes))
 
 
+def skip_count(conn, since_ts, strategy):
+    """(refused, best net %) for probes the hourly cap refused, or (0, None)."""
+    if not has_table(conn, "probe_skips"):
+        return 0, None
+    n, best = conn.execute("SELECT COUNT(*), MAX(net_edge) FROM probe_skips"
+                           " WHERE ts >= ? AND strategy = ?", (since_ts, strategy)).fetchone()
+    return n, best
+
+
+def print_skips(conn, since, strategy):
+    n, best = skip_count(conn, since, strategy)
+    if n:
+        print(f"  hourly cap refused {n} (best $100 net {fmt_pct(best)}); they were retried while"
+              " still above the threshold")
+
+
 def fmt_pct(v):
     return f"{v:+.3f}%" if v is not None else "can't fill"
 
@@ -289,8 +305,9 @@ def print_report(conn, since, min_usd, top):
     print("\n'sum best $' adds each episode's best moment once: an upper bound, not a P&L.")
     print("Prices show '?' for episodes logged before price tracking was added.")
 
-    print("\nSIZE PROBES (dex>dex gaps re-quoted at bigger sizes when they open; net after gas)")
+    print("\nSIZE PROBES (dex>dex gaps re-quoted at bigger sizes when they reach the threshold; net after gas)")
     print_probe_table(conn, since, top, "episode_probes", "pair  buy>sell pool", 40)
+    print_skips(conn, since, "dex_arb_probe")
 
     print("\nTRIANGLE (every scan at $100, net after fees and gas)")
     loops = tri_summary(conn, since)
@@ -303,6 +320,7 @@ def print_report(conn, since, min_usd, top):
 
     print("\nTRIANGLE SIZE PROBES (loops re-quoted at bigger sizes when they open; net after gas)")
     print_probe_table(conn, since, top, "tri_probes", "loop  leg1/leg2/leg3 pools", 52)
+    print_skips(conn, since, "tri_arb_probe")
 
     print("\nCEX TRIANGLE (one exchange, order books walked at $100; net after taker fees, raw before)")
     cex_loops = cex_tri_summary(conn, since)

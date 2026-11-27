@@ -11,6 +11,12 @@ Minute stats: per route per minute, best/average net % and how many samples
 
 Note: Base makes a block about every 0.2s and the scanner samples about every
 2s, so "samples" and "seconds" are the meaningful durations, not block counts.
+
+Gaps (Nov 27, 2026): a scan that is skipped (same or older block) or fails never
+reaches update(), so an open episode used to stretch across the hole as if it had
+been seen the whole time. With max_gap_s set, an episode whose last sample is more
+than max_gap_s old is closed first (its seconds end at its last real sample); if the
+route is still positive, a new episode starts.
 """
 from __future__ import annotations
 
@@ -45,8 +51,9 @@ class Episode:
 
 
 class EpisodeTracker:
-    def __init__(self):
+    def __init__(self, max_gap_s: float | None = None):
         self.open = {}   # (pair, key) -> Episode
+        self.max_gap_s = max_gap_s     # None = never split on a gap (the old behavior)
 
     def update(self, block: int, ts: float, results: dict, mids: dict | None = None):
         """results: {(pair, key): RouteResult} for this round.
@@ -57,7 +64,8 @@ class EpisodeTracker:
         closed = []
         for k, ep in list(self.open.items()):
             r = results.get(k)
-            if r is None or r.net_usd <= 0:
+            gap = self.max_gap_s is not None and ts - ep.end_ts > self.max_gap_s
+            if r is None or r.net_usd <= 0 or gap:
                 closed.append(self.open.pop(k))
         for k, r in results.items():
             if r.net_usd <= 0:

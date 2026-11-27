@@ -57,7 +57,7 @@ class Scanner:
         self.pairs = list(cfg.PAIRS)   # active pairs: PAIRS plus the EXTRA_PAIRS that passed startup
         self.extra_names = []    # names of the active extra pairs, in config order
         self.dex_ref = {}        # extra pair name -> last round's median pool price (USD)
-        self.tracker = EpisodeTracker()
+        self.tracker = EpisodeTracker(getattr(cfg, "EPISODE_MAX_GAP_S", None))
         self.minutes = MinuteStats()
         self.last_block = None
         self.book_failures = 0
@@ -269,10 +269,15 @@ class Scanner:
     def step(self):
         """One scan. Returns (block, results) or None if the block hasn't changed."""
         cfg = self.cfg
-        # Quote the chain and fetch the books at the same time.
+        # Quote the chain and fetch the books at the same time. The pools are SIZED with the
+        # reference prices we have now (from the previous scan's books), so they must also be
+        # VALUED with them: sizing_qusd is used for both. Valuing a WETH-quoted buy with the
+        # NEW ETH price would add ETH's ~2s move to every gap on that pair as fake edge
+        # (bug fixed Nov 27, 2026; affected ETH/BTC, AERO/ETH, VIRTUAL/ETH dex>dex).
+        sizing_qusd = self.quote_usds()
         rd_job = self.pool.submit(dex.quote_round, self.rpc, cfg, self.pair_pools,
                                   dict(self.ref_prices), cfg.TRADE_SIZE_USD, self.cross,
-                                  self.quote_usds())
+                                  sizing_qusd)
         self.fetch_books()
         rd = rd_job.result()
         # Same block as last scan = nothing new. An OLDER block can happen when scans
@@ -283,12 +288,12 @@ class Scanner:
         now = self.clock()
         self.update_ref_prices()
         eth_usd = self.ref_prices.get("ETH")
-        quote_usd = self.quote_usds()
+        quote_usd = self.quote_usds()      # fresh: for probes, which size and value on their own
 
         results = {}
         price_rows = []
         for name, (pair, _pools) in self.pair_pools.items():
-            quotes = dex.to_dex_quotes(cfg, rd, pair, eth_usd, quote_usd.get(name) or 1.0)
+            quotes = dex.to_dex_quotes(cfg, rd, pair, eth_usd, sizing_qusd.get(name) or 1.0)
             if name in self.extra_names:
                 mid = dex.dex_mid(quotes, cfg.TRADE_SIZE_USD)
                 if mid:
@@ -316,9 +321,10 @@ class Scanner:
                 db.insert_tri(self.conn, now, rd.block, self.last_tri)
             tri_opening = self.tri_prober.openings(self.last_tri)
 
-        # episodes opening this round, found before the tracker marks them open
-        opening = self.prober.openings(results, self.tracker.open)
         closed = self.tracker.update(rd.block, now, results, dict(self.ref_prices))
+        # episodes at or above the probe threshold that haven't been probed yet (new ones
+        # and ones that just crossed), found after the tracker has this scan's episodes
+        opening = self.prober.openings(results, self.tracker.open)
         if closed:
             db.insert_episodes(self.conn, closed)
             for e in closed:

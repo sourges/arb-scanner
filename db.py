@@ -91,6 +91,21 @@ CREATE TABLE IF NOT EXISTS cex_quotes (
     fetch_s       REAL
 );
 CREATE INDEX IF NOT EXISTS idx_cex_path_ts ON cex_quotes (path, ts);
+-- Probes the hourly cap refused (Nov 27, 2026): one row per episode/loop the first time
+-- it is refused, so the report can say how much the cap hid. Shared columns first.
+-- net_edge = the $100 net % that triggered it; raw_edge and size_usd are $100-scan values.
+CREATE TABLE IF NOT EXISTS probe_skips (
+    ts            REAL,
+    strategy      TEXT,
+    venue         TEXT,
+    path          TEXT,
+    size_usd      REAL,
+    raw_edge      REAL,
+    net_edge      REAL,
+    block         INTEGER,
+    reason        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_probe_skips_ts ON probe_skips (ts);
 CREATE TABLE IF NOT EXISTS episode_probes (
     ts            REAL,
     strategy      TEXT,
@@ -179,6 +194,8 @@ CREATE INDEX IF NOT EXISTS idx_prices_path_ts ON scan_prices (path, ts);
 EPISODE_PRICE_COLUMNS = ["start_mid", "best_mid", "best_buy_px", "best_sell_px"]
 # Pool depth (Nov 14, 2026): the same pool quoted at a bigger size. Older rows read NULL.
 PEGGED_DEPTH_COLUMNS = ["depth_usd", "depth_bid", "depth_ask"]
+# Probe's own block (Nov 27, 2026). `block` stays the triggering scan's block. Older rows NULL.
+PROBE_BLOCK_TABLES = ["episode_probes", "tri_probes"]
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -193,6 +210,10 @@ def connect(path: str) -> sqlite3.Connection:
     for col in PEGGED_DEPTH_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE pegged_quotes ADD COLUMN {col} REAL")
+    for table in PROBE_BLOCK_TABLES:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "probe_block" not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN probe_block INTEGER")
     conn.commit()
     return conn
 
@@ -257,12 +278,23 @@ def insert_probes(conn, ts, block, route, results, strategy="dex_arb_probe", ven
     so a probe joins its episode on (pair, route, start_ts = ts). NULL edges = can't fill."""
     conn.executemany(
         "INSERT INTO episode_probes (ts, strategy, venue, path, size_usd, raw_edge, net_edge,"
-        " block, route, pair, buy_pool, sell_pool, usd_back, gas_usd, buy_px, sell_px)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " block, route, pair, buy_pool, sell_pool, usd_back, gas_usd, buy_px, sell_px, probe_block)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block, route,
-          r.pair, r.buy_pool, r.sell_pool, r.usd_back, r.gas_usd, r.buy_px, r.sell_px)
+          r.pair, r.buy_pool, r.sell_pool, r.usd_back, r.gas_usd, r.buy_px, r.sell_px,
+          getattr(r, "probe_block", None))
          for r in results],
     )
+    conn.commit()
+
+
+def insert_probe_skip(conn, ts, block, strategy, path, size_usd, net_edge, reason="hourly_cap",
+                      raw_edge=None, venue="base"):
+    """One probe the hourly cap refused (see probe.py / tri_probe.py)."""
+    conn.execute(
+        "INSERT INTO probe_skips (ts, strategy, venue, path, size_usd, raw_edge, net_edge, block, reason)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (ts, strategy, venue, path, size_usd, raw_edge, net_edge, block, reason))
     conn.commit()
 
 
@@ -284,10 +316,11 @@ def insert_tri_probes(conn, ts, block, results, strategy="tri_arb_probe", venue=
     """Triangle size-probe rows: one per size (see tri_probe.py). NULL edges = can't fill."""
     conn.executemany(
         "INSERT INTO tri_probes (ts, strategy, venue, path, size_usd, raw_edge, net_edge, block,"
-        " loop, leg1, leg2, leg3, usd_back, gas_usd, trigger_net)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " loop, leg1, leg2, leg3, usd_back, gas_usd, trigger_net, probe_block)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(ts, strategy, venue, r.path, r.size_usd, r.raw_edge, r.net_edge, block, r.loop,
-          r.legs[0], r.legs[1], r.legs[2], r.usd_back, r.gas_usd, r.trigger_net) for r in results],
+          r.legs[0], r.legs[1], r.legs[2], r.usd_back, r.gas_usd, r.trigger_net,
+          getattr(r, "probe_block", None)) for r in results],
     )
     conn.commit()
 

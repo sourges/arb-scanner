@@ -262,6 +262,38 @@ class TestInScanner(unittest.TestCase):
         self.assertEqual(s.prober.skipped, 0)                           # dex>dex budget untouched
         s.shutdown()
 
+    def test_refused_crossing_is_retried_and_stored_once(self):
+        """Nov 27, 2026: a crossing refused by the cap used to be lost for good."""
+        chain = FakeChain()
+        add_cross(chain, aero_premium=1.008)
+        s, clock = make_scanner(chain, TRI_PROBE_MAX_PER_HOUR=1)
+        s.tri_cap.allow(clock())                                        # budget spent
+        step(s, chain, clock)
+        step(s, chain, clock)                                           # still refused
+        self.assertEqual(rows(s), [])
+        skips = s.conn.execute("SELECT strategy, path, reason FROM probe_skips").fetchall()
+        self.assertEqual(skips, [("tri_arb_probe", FWD, "hourly_cap")])     # stored once
+        add_cross(chain)                                                # loop drops below...
+        step(s, chain, clock)
+        add_cross(chain, aero_premium=1.008)                            # ...and crosses again:
+        step(s, chain, clock)                                           # a new refusal row
+        self.assertEqual(s.conn.execute("SELECT COUNT(*) FROM probe_skips").fetchone(), (2,))
+        clock.t += 3600                                                 # budget back
+        step(s, chain, clock)
+        self.assertEqual(len(rows(s)), len(SIZES))                      # retried and probed
+        step(s, chain, clock)
+        self.assertEqual(len(rows(s)), len(SIZES))                      # and only once
+        s.shutdown()
+
+    def test_probe_block_stored(self):
+        chain = FakeChain()
+        add_cross(chain, aero_premium=1.008)
+        s, clock = make_scanner(chain)
+        step(s, chain, clock)
+        blocks = set(s.conn.execute("SELECT block, probe_block FROM tri_probes"))
+        self.assertEqual(blocks, {(chain.block, chain.block)})          # fake chain: same block
+        s.shutdown()
+
     def test_busy_triangle_cannot_use_up_dex_dex_probes(self):
         # Spend the whole triangle budget, then check the dex>dex cap still has all of it.
         chain = FakeChain()

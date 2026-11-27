@@ -100,7 +100,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 320 tests ... OK)
+python -m unittest            (expect: Ran 343 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -277,6 +277,28 @@ pair per scan, from data the scan already has (no extra RPC calls):
 - Shared-format columns first: `ts, strategy ('px'), venue ('base'), path (ETH or BTC), size_usd, raw_edge, net_edge`. **raw_edge** = DEX mid / CEX mid - 1 in % (Kraken's mid, or Coinbase's if Kraken has no fresh book); positive = pools priced above the exchange. **net_edge** is always empty: no costs are applied.
 - Use it to measure how many seconds the pools take to follow Kraken, to drop stale-book gaps, or to re-price routes with other fees.
 - About 86,000 small rows a day, the same as `tri_quotes`. `PRICE_LOG = False` in `config.py` turns it off. Rows start Nov 14, 2026.
+
+## Measurement fixes (Nov 27, 2026, from two outside code reviews)
+
+- **Price snapshot (a real bug, Nov 17 - Nov 27).** Pairs quoted in WETH or cbBTC
+  (ETH/BTC, AERO/ETH, VIRTUAL/ETH) were sized with the previous scan's ETH/BTC price
+  but valued with this scan's, so the quote token's ~2s move showed up as edge on every
+  dex>dex route for those pairs (ETH +0.3% between scans turned a -0.11% route into a
+  fake +0.19%). Now each scan sizes and values with the same snapshot. ETH/USDC,
+  BTC/USDC, SOL, all CEX routes, the triangle and the probes were not affected.
+  **dex>dex episodes on those three pairs from before this fix are not reliable during
+  fast moves**: leave them out of the Dec 11 decision or correct them from scan_prices.
+- **Episode gaps.** An episode whose last positive sample is more than
+  `EPISODE_MAX_GAP_S` (6s) old is closed instead of stretching over skipped or failed
+  scans; if the route is still positive a new episode starts.
+- **Probe timing.** A dex>dex episode is probed the first scan it is at or above
+  `PROBE_MIN_NET_PCT`, even if it opened below it; once per episode. A probe the hourly
+  cap refuses is retried next scan (dex>dex and triangle); the first refusal is stored
+  in `probe_skips` and the report prints "hourly cap refused N". Probe rows keep `ts` =
+  the episode start (for joins) and `block` = the triggering scan, and now also store
+  `probe_block`, the block the probe was quoted at.
+- **RPC.** "out of gas" / "gas required exceeds" / "execution reverted" replies are
+  `RpcCallError`: not retried on the other provider, never bench it.
 
 ## If the scanner stops
 

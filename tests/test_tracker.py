@@ -25,6 +25,27 @@ class TestEpisodeTracker(unittest.TestCase):
         self.assertEqual(ep.best_buy, "C")
         self.assertEqual(t.open, {})
 
+    def test_gap_closes_episode_and_starts_a_new_one(self):
+        """max_gap_s 6: samples at 10, 12, then 20 (8s gap: scans skipped or failed)."""
+        t = EpisodeTracker(max_gap_s=6.0)
+        t.update(1, 10.0, {K: rr(0.2)})
+        self.assertEqual(t.update(2, 12.0, {K: rr(0.3)}), [])
+        (ep,) = t.update(3, 20.0, {K: rr(0.4)})
+        self.assertEqual((ep.samples, ep.seconds), (2, 2.0))       # ends at its last real sample
+        self.assertEqual((t.open[K].start_ts, t.open[K].samples), (20.0, 1))
+
+    def test_gap_at_the_limit_does_not_split(self):
+        t = EpisodeTracker(max_gap_s=6.0)
+        t.update(1, 10.0, {K: rr(0.2)})
+        self.assertEqual(t.update(2, 16.0, {K: rr(0.2)}), [])      # exactly 6s: same episode
+        self.assertEqual(t.open[K].samples, 2)
+
+    def test_no_limit_keeps_old_behavior(self):
+        t = EpisodeTracker()
+        t.update(1, 10.0, {K: rr(0.2)})
+        self.assertEqual(t.update(2, 100.0, {K: rr(0.2)}), [])
+        self.assertEqual(t.open[K].seconds, 90.0)
+
     def test_missing_route_closes_episode(self):
         t = EpisodeTracker()
         t.update(1, 0.0, {K: rr(0.2)})

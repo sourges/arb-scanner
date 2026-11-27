@@ -25,8 +25,11 @@ THIS gap absorb", not "what is the best loop at $5,000".
 Rows go in tri_probes, one per size, with the shared columns first
 (ts, strategy, venue, path, size_usd, raw_edge, net_edge). path is the loop plus
 its three pools, e.g. "USDC>WETH>cbBTC>USDC pcsv3-100/aero3-ts1/pcsv3-100".
-Probes share probe.py's hourly cap (PROBE_MAX_PER_HOUR). A probe that fails is
-logged and skipped; it never stops the scanner.
+Triangle probes have their own hourly cap (TRI_PROBE_MAX_PER_HOUR). A crossing the cap
+refuses is tried again on the next scan while the loop stays above the threshold, and
+the first refusal is stored in probe_skips (Nov 27, 2026). A probe that fails is logged
+and skipped; it never stops the scanner. probe_block is the block the probe was quoted
+at; block is the triggering scan's.
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ from dataclasses import dataclass
 import abi
 import db
 import dex
+import probe
 
 STRATEGY = "tri_arb_probe"
 
@@ -47,6 +51,7 @@ class TriProbeResult:
     usd_back: float | None   # None = a leg couldn't fill
     gas_usd: float
     trigger_net: float   # the $100 net % from the scan that opened it
+    probe_block: int | None = None   # block the probe was quoted at (Nov 27, 2026)
 
     @property
     def path(self) -> str:
@@ -91,7 +96,9 @@ def quote_sizes(rpc, cfg, loop, tok1, tok2, pools, sizes, ref1, ref2,
                 basefee_wei, l1_fee_wei, eth_usd, trigger_net):
     """Price the loop at every size in one eth_call. Returns [TriProbeResult]."""
     calls, xs = build_calls(cfg, tok1, tok2, pools, sizes, ref1, ref2)
+    calls.append((cfg.MULTICALL3, abi.encode_no_args(abi.SIG_BLOCK_NUMBER)))
     results = dex.multicall(rpc, cfg.MULTICALL3, calls)
+    probe_block = probe.read_block(results.pop())
 
     def gas(units):
         if not units:
@@ -109,7 +116,8 @@ def quote_sizes(rpc, cfg, loop, tok1, tok2, pools, sizes, ref1, ref2,
             got1 = o1                       # raw token 1 from leg 1 (exact)
             got2 = o2 * (got1 / x1)         # raw token 2, scaled to what leg 1 produced
             usd_back = o3 * (got2 / x2) / 10 ** cfg.USDC["decimals"]
-        out.append(TriProbeResult(loop, labels, size, usd_back, gas(g1) + gas(g2) + gas(g3), trigger_net))
+        out.append(TriProbeResult(loop, labels, size, usd_back, gas(g1) + gas(g2) + gas(g3), trigger_net,
+                                  probe_block))
     return out
 
 
@@ -138,6 +146,7 @@ class TriProber:
         self.sizes = list(getattr(cfg, "PROBE_SIZES_USD", []))
         self.min_pct = getattr(cfg, "TRI_PROBE_MIN_NET_PCT", None)
         self.prev = {}           # loop path -> net % on the previous scan
+        self.noted = set()       # loops whose cap refusal is stored (until probed or below)
         self.probes = 0
         self.failures = 0
 
@@ -156,6 +165,7 @@ class TriProber:
                 out.append(r)
         # a loop missing this scan (a leg had no quote) counts as below the threshold
         self.prev = {r.path: r.net_edge for r in tri_results}
+        self.noted &= {r.path for r in tri_results if r.net_edge >= self.min_pct}
         return out
 
     def probe(self, now, block, opening, cross, pair_pools, ref_prices, basefee_wei, l1_fee_wei):
@@ -165,7 +175,17 @@ class TriProber:
         sym_a = a["base"]["symbol"]
         for r in opening:
             if not self.allow(now):
+                # forget this scan's net, so the loop counts as crossing again next scan
+                # (Nov 27, 2026: a refused crossing used to be lost); store the first refusal
+                self.prev.pop(r.path, None)
+                if r.path not in self.noted:
+                    self.noted.add(r.path)
+                    try:
+                        db.insert_probe_skip(self.conn, now, block, STRATEGY, r.path, 100.0, r.net_edge)
+                    except Exception as e:
+                        self.log(f"tri probe skip not stored ({type(e).__name__}: {e})")
                 continue
+            self.noted.discard(r.path)
             try:
                 first, second = (a, b) if r.path.startswith(f"USDC>{sym_a}>") else (b, a)
                 p1 = {p.label: p for p in pair_pools[first["name"]][1]}[r.legs[0]]
