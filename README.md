@@ -100,7 +100,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 346 tests ... OK)
+python -m unittest            (expect: Ran 377 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
@@ -299,6 +299,23 @@ pair per scan, from data the scan already has (no extra RPC calls):
   `probe_block`, the block the probe was quoted at.
 - **RPC.** "out of gas" / "gas required exceeds" / "execution reverted" replies are
   `RpcCallError`: not retried on the other provider, never bench it.
+
+## Report additions for the Dec 11 decision (Nov 27, 2026)
+
+    python report.py --since "2026-11-27 17:10"                    everything since the fix
+    python report.py --since "2026-11-27 17:10" --until "2026-12-11 17:10"   the Dec 11 window
+
+- **EPISODES BY LENGTH:** per route, one-scan flashes vs episodes of 2+ samples (a
+  2-second scanner can't act on a flash), and the 2+ value with Aero-leg episodes at 50%.
+- **MARKOUTS** (`markout.py`): every CEX<->DEX episode re-priced with the CEX leg done
+  +2/+4/+10/+30s later, from scan_prices, and who closed the gap: `pool` (the pool was
+  wrong: a real gap) vs `cex` (the CEX was lagging: a directional bet). Majors (ETH, BTC)
+  and long tail (SOL) are listed separately.
+- **DEC 11 RULE** (`dec11.py`): the rule fixed on Nov 27 in research-notes
+  (projects/dex-arbitrage.md), applied to the dex>dex probes in the window: expected
+  $/day per size at a 42.5% success rate and $0.15 per success, Aero at 50%, flashes
+  not counted, days > 0 and the top day's share, and a mechanical verdict
+  (PASS / IN BETWEEN / SHELVE) to check by hand.
 
 ## If the scanner stops
 

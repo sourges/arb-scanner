@@ -21,6 +21,7 @@ import io
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -58,6 +59,45 @@ class TestReport(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         self.tmp.cleanup()
+
+    def test_episode_lengths(self):
+        """samples = secs // 2 + 1 in ep(): 0.668 has 10, kraken 0.537 has 1 (a flash),
+        BTC 0.130 has 4 and 0.060 has 2. Dust (< $0.05) is left out."""
+        rows = report.episode_lengths(self.conn, 0, 0.05)
+        self.assertEqual([r[:2] for r in rows], [("ETH", "dex>dex"), ("ETH", "kraken>dex"), ("BTC", "dex>dex")])
+        eth, kraken, btc = rows
+        self.assertEqual((eth[2], eth[4]), (0, 1))
+        self.assertAlmostEqual(eth[5], 0.668)
+        self.assertEqual((kraken[2], kraken[4]), (1, 0))
+        self.assertAlmostEqual(kraken[3], 0.537)
+        self.assertAlmostEqual(btc[5], 0.190)
+        self.assertAlmostEqual(btc[6], 0.190)                 # no Aero leg: no haircut
+
+    def test_episode_lengths_aero_haircut(self):
+        e = Episode("dex>dex", "SOL", 1, 5000.0, 3, 5004.0, 3, 0.40, 0.40, "aerov3-ts10", "aero3-ts10")
+        db.insert_episodes(self.conn, [e])
+        (sol,) = [r for r in report.episode_lengths(self.conn, 4000.0, 0.05)]
+        self.assertAlmostEqual(sol[5], 0.40)
+        self.assertAlmostEqual(sol[6], 0.20)
+
+    def test_parse_when(self):
+        self.assertEqual(report.parse_when("1764281400"), 1764281400.0)
+        self.assertEqual(report.parse_when("2026-11-27 17:10"),
+                         time.mktime(time.strptime("2026-11-27 17:10", "%Y-%m-%d %H:%M")))
+        self.assertEqual(report.parse_when("2026-11-27"),
+                         time.mktime(time.strptime("2026-11-27", "%Y-%m-%d")))
+        with self.assertRaises(Exception):
+            report.parse_when("last tuesday")
+
+    def test_since_limits_the_window(self):
+        buf = io.StringIO()
+        with mock.patch.object(report.config, "DB_PATH", self.path), redirect_stdout(buf):
+            report.main(["--since", "1250"])
+        out = buf.getvalue()
+        self.assertIn("EPISODES BY LENGTH", out)
+        lengths = out.split("EPISODES BY LENGTH")[1].split("\n\n")[0]
+        self.assertNotIn("ETH dex>dex", lengths)              # its episodes start before 1250
+        self.assertIn("BTC dex>dex", lengths)
 
     def test_dust_count(self):
         self.assertEqual(report.dust_count(self.conn, 0, 0.05), 2)

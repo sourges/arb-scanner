@@ -2,6 +2,8 @@
 
 Run:  python report.py                      whole history
       python report.py --hours 24           last 24 hours only
+      python report.py --since "2026-11-27 17:10"   from a local date/time on
+      python report.py --since "2026-11-27 17:10" --until "2026-12-11"   a fixed window
       python report.py --min-usd 0.10       count only episodes that reached $0.10
       python report.py --top 30             list the 30 best episodes (default 15)
 
@@ -16,6 +18,12 @@ round trip at $100 and at the bigger depth size (a thin pool's blows up).
 
 Episodes below --min-usd (default $0.05) are counted as dust and left out of
 the episode tables, so the few real opportunities aren't buried.
+
+Added Nov 27, 2026 (after two outside reviews):
+  EPISODES BY LENGTH   one-scan flashes vs episodes of 2+ samples (a 2-second scanner
+                       can't act on a flash), with Aero-leg value also shown at 50%
+  MARKOUTS             CEX<->DEX episodes re-priced with the CEX leg 2-30s later (markout.py)
+  DEC 11 RULE          the dex>dex decision rule applied to the window (dec11.py)
 """
 import argparse
 import sqlite3
@@ -23,6 +31,8 @@ import statistics
 import time
 
 import config
+import dec11
+import markout
 
 DEFAULT_MIN_USD = 0.05
 
@@ -56,6 +66,42 @@ def episode_summary(conn, since_ts, min_usd):
                         max(e[0] for e in eps),
                         sum(e[1] for e in eps)))
     return sorted(summary, key=lambda r: -r[5])
+
+
+def episode_lengths(conn, since_ts, min_usd, until_ts=None):
+    """Per route, episodes >= min_usd split by length:
+    (pair, route, flash count, flash $, 2+ count, 2+ $, 2+ $ with Aero legs at 50%).
+    A flash is one sample; a 2-second scanner can't act on it."""
+    until_ts = until_ts if until_ts is not None else float("inf")
+    out = {}
+    for pair, route, samples, usd, buy, sell in conn.execute(
+            "SELECT pair, route, samples, max_net_usd, best_buy, best_sell FROM episodes"
+            " WHERE start_ts >= ? AND start_ts < ? AND max_net_usd >= ?", (since_ts, until_ts, min_usd)):
+        r = out.setdefault((pair, route), [0, 0.0, 0, 0.0, 0.0])
+        if (samples or 0) >= 2:
+            aero = dec11.is_aero(buy) or dec11.is_aero(sell)
+            r[2] += 1
+            r[3] += usd
+            r[4] += usd * (dec11.AERO_HAIRCUT if aero else 1.0)
+        else:
+            r[0] += 1
+            r[1] += usd
+    rows = [(pair, route, *v) for (pair, route), v in out.items()]
+    return sorted(rows, key=lambda r: -(r[5] + r[3]))
+
+
+def parse_when(text):
+    """'2026-11-27 17:10', '2026-11-27' (local time) or a unix timestamp -> unix seconds."""
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(text, f))
+        except ValueError:
+            continue
+    raise argparse.ArgumentTypeError(f"can't read {text!r}: use 'YYYY-MM-DD HH:MM' (local time)")
 
 
 def top_episodes(conn, since_ts, min_usd, limit):
@@ -269,17 +315,25 @@ def main(argv=None):
     ap.add_argument("--hours", type=float, default=None)
     ap.add_argument("--min-usd", type=float, default=DEFAULT_MIN_USD)
     ap.add_argument("--top", type=int, default=15)
+    ap.add_argument("--since", type=parse_when, default=None,
+                    help="local date/time to start from, e.g. '2026-11-27 17:10'")
+    ap.add_argument("--until", type=parse_when, default=None,
+                    help="local date/time to stop at (DEC 11 RULE window only)")
     args = ap.parse_args(argv)
+    now = time.time()
     since = time.time() - args.hours * 3600 if args.hours else 0
+    if args.since is not None:
+        since = args.since
+    until = args.until if args.until is not None else now
 
     conn = sqlite3.connect(config.DB_PATH)
     try:
-        print_report(conn, since, args.min_usd, args.top)
+        print_report(conn, since, args.min_usd, args.top, until)
     finally:
         conn.close()   # Windows can't delete or move an open database file
 
 
-def print_report(conn, since, min_usd, top):
+def print_report(conn, since, min_usd, top, until=None):
     print("ROUTES (from minute stats)")
     print(f"{'pair route':<38}{'samples':>9}{'% >0':>8}{'best %':>9}{'avg %':>9}")
     for pair, route, n, pos, best, avg in route_summary(conn, since):
@@ -305,9 +359,23 @@ def print_report(conn, since, min_usd, top):
     print("\n'sum best $' adds each episode's best moment once: an upper bound, not a P&L.")
     print("Prices show '?' for episodes logged before price tracking was added.")
 
+    print(f"\nEPISODES BY LENGTH (>= ${min_usd:.2f}; a 1-scan flash can't be acted on at 2s scans)")
+    lengths = episode_lengths(conn, since, min_usd)
+    if not lengths:
+        print("  none")
+    else:
+        print(f"{'pair route':<38}{'flashes':>8}{'flash $':>9}{'2+ scans':>10}{'2+ $':>9}{'2+ $ aero/2':>13}")
+        for pair, route, fn, fusd, ln, lusd, lhair in lengths:
+            print(f"{pair + ' ' + route:<38}{fn:>8}{fusd:>9.3f}{ln:>10}{lusd:>9.3f}{lhair:>13.3f}")
+
+    if has_table(conn, "scan_prices"):
+        markout.print_section(conn, since, min_usd, config.CEX_FEES)
+
     print("\nSIZE PROBES (dex>dex gaps re-quoted at bigger sizes when they reach the threshold; net after gas)")
     print_probe_table(conn, since, top, "episode_probes", "pair  buy>sell pool", 40)
     print_skips(conn, since, "dex_arb_probe")
+    if has_table(conn, "episode_probes"):
+        dec11.print_section(conn, since, until if until is not None else time.time())
 
     print("\nTRIANGLE (every scan at $100, net after fees and gas)")
     loops = tri_summary(conn, since)
