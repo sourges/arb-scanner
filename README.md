@@ -100,7 +100,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env        (then paste your Alchemy/QuickNode Base URL into .env)
-python -m unittest            (expect: Ran 343 tests ... OK)
+python -m unittest            (expect: Ran 346 tests ... OK)
 python scanner.py --once      (one block, prints every route and every pegged-pool quote: sanity-check vs the exchanges)
 python scanner.py             (or double-click run_scanner.bat)
 ```
